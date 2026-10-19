@@ -56,8 +56,34 @@ prove how much content each engine analysed. The warning alone does not show
 that scanning stopped after the first 3MB. A 0/69 detection summary also does
 not establish identical engine coverage between two files.
 
-This comparison APK has not yet been uploaded to VirusTotal by this build
-workflow. Whether v2-only signing removes the warning remains to be tested.
+## Observed result
+
+On 19 October 2026, the user uploaded this comparison APK and reported the same
+archive warning about a 3MB limit and multiple contained files. V2-only signing
+therefore did not remove the warning; the added v1/v3 signatures are not its
+sole cause. The user reported `Undetected` for both `Trustlook` and
+`Avast-Mobile` on the Detection tab. These are no-detection results, rather than
+unsupported-file or failure statuses; they do not report the number of bytes or
+internal files each engine analysed.
+
+The complete per-engine report was not fetched by this build workflow. No claim
+of exhaustive scanning, a specific 3MB truncation, or identical coverage to the
+official APK can be made from the warning and detection summary alone.
+
+Further local inspection found that apksigner's default realignment adds Android
+alignment extra fields and page padding before the signing block. Android's
+[ApkSigner implementation](https://android.googlesource.com/platform/tools/apksig/+/refs/heads/main/src/main/java/com/android/apksig/ApkSigner.java)
+and [signer engine](https://android.googlesource.com/platform/tools/apksig/+/refs/heads/main/src/main/java/com/android/apksig/DefaultApkSignerEngine.java)
+implement these behaviours intentionally. Both APK layouts pass Android signature,
+ZIP integrity and 16KiB native alignment checks. No malformed ZIP entry or proven
+cause of the VirusTotal upload warning was found.
+
+VirusTotal documents a 3MB restriction for a specific
+[password-protected archive extraction path](https://docs.virustotal.com/docs/compressed-files).
+That is not documentation that an APK scan reads only its first 3MB. Its
+[analysis-result reference](https://gtidocs.virustotal.com/reference/file-analysis-object)
+distinguishes `undetected`, `failure`, `timeout` and `type-unsupported`, but those
+statuses do not provide a byte-by-byte coverage measurement.
 
 Public verification output:
 
