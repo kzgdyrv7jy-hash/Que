@@ -91,3 +91,6 @@ Public verification output:
 - [Android metadata](downloads/v2-only-apk-metadata.txt)
 - [Payload comparison](downloads/v2-only-comparison.json)
 - [Download checksums](downloads/SHA256SUMS.txt)
+
+The next controlled comparison also preserves Gradle's original ZIP entry
+layout during signing. See [ZIP layout validation](ZIP_LAYOUT_VALIDATION.md).

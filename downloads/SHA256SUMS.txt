@@ -1,5 +1,6 @@
 0434c80bfa5bc0cd055a03c4dce2ab2fb1a0b5ba0b42b65142f35eac7223210f  AerioTV-Blue-0.5.11-blue.1.apk
 541a9068ce0338e2e40cd4f475ee226519955e2b6718df6c392df7b00fe1eada  AerioTV-Que-0.5.13-que.1-v2-only.apk
+ad8be584ebd27329d9b4edfa3e6ae0d9d27480da390a2715f1fc34fed9dc74a9  AerioTV-Que-0.5.13-que.1-v2-preserved.apk
 790049da67e264700ca518571b490a8b614f53183da4ac73f39f8299faa1e76e  AerioTV-Que-0.5.13-que.1.apk
 9407b87c564c7072db2c7517781d1e444ea64a2d6c3c5408371d984d0e6d8255  AerioTV-Que-0.5.13-source.zip
 c1743f5fa48b3664bd738e14f010af26ba9edd71bccccec942a1f8df68b770bc  apk-metadata.txt
@@ -10,3 +11,6 @@ fbb08987d11a48cbcf17340fca8643b5a6ff50f33123d746a4b3f5900fd10021  source-sha256.
 c1743f5fa48b3664bd738e14f010af26ba9edd71bccccec942a1f8df68b770bc  v2-only-apk-metadata.txt
 82ac54565571c9f58572e7e5284639125b2ba247b4e857db9baabe4398e2b9cf  v2-only-comparison.json
 96e9df32dd188bf897292d668e625bbce742a03c171944bf2263ff127354a30a  v2-only-signature-verification.txt
+c1743f5fa48b3664bd738e14f010af26ba9edd71bccccec942a1f8df68b770bc  v2-preserved-apk-metadata.txt
+7d5a9bbd82722fa76f23aae6f1186da8941b4eea15c922acd404ac7f2cf4ebc1  v2-preserved-comparison.json
+96e9df32dd188bf897292d668e625bbce742a03c171944bf2263ff127354a30a  v2-preserved-signature-verification.txt

@@ -1,0 +1,18 @@
+{
+  "apk": "AerioTV-Que-0.5.13-que.1-v2-preserved.apk",
+  "bytes": 12224897,
+  "sha256": "ad8be584ebd27329d9b4edfa3e6ae0d9d27480da390a2715f1fc34fed9dc74a9",
+  "identical_payload_entries": 1024,
+  "identical_raw_zip_entry_bytes": 12154448,
+  "pre_signing_block_gap": 2480,
+  "signing_scheme": "v2 only",
+  "alignment": "16KiB native / 4-byte stored passed",
+  "signing_certificate_sha256": "c66eabc3339a28adcfca2e3003ecdb679812def71f59e6068a20d0c9d1ca389e",
+  "unsigned_base_sha256": "59d538b48b968c43359151a0191af087ae5e3c5372a49309e2408733d94f75df",
+  "original_que_sha256": "790049da67e264700ca518571b490a8b614f53183da4ac73f39f8299faa1e76e",
+  "previous_v2_only_sha256": "541a9068ce0338e2e40cd4f475ee226519955e2b6718df6c392df7b00fe1eada",
+  "raw_local_entry_headers_padding_offsets_and_compressed_streams": "identical to unsigned Gradle output",
+  "application_id": "com.aeriotv.blue",
+  "version_name": "0.5.13-que.1",
+  "version_code": 6901
+}
