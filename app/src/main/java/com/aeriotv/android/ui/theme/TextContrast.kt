@@ -65,7 +65,17 @@ val ColorScheme.textAccent: Color
 /** One-off dimmed text color (e.g. onBackground.copy(alpha = 0.7f)) with Text Contrast applied. */
 @Composable
 @ReadOnlyComposable
-fun Color.forText(): Color = contrastBlend(this, LocalTextContrast.current, LocalIsDarkTheme.current)
+fun Color.forText(): Color {
+    val colors = androidx.compose.material3.MaterialTheme.colorScheme
+    val backgrounds = listOf(colors.background, colors.surface, colors.surfaceVariant) +
+        if (LocalAppTheme.current == AppTheme.RoyalBlue && LocalIsDarkTheme.current && !LocalTrueBlack.current) {
+            listOf(RoyalBlueTop, RoyalBlueDecoratedTop)
+        } else emptyList()
+    return ensureTextContrast(
+        contrastBlend(this, LocalTextContrast.current, LocalIsDarkTheme.current),
+        backgrounds,
+    )
+}
 
 /**
  * colorScheme.onSurfaceVariant WITHOUT Text Contrast, for non-text uses

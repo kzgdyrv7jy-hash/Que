@@ -1594,8 +1594,22 @@ class AerioCastSender @Inject constructor(
         Log.i(TAG, "[MV-CAST] cast composite \"${base.subtitle}\" previous=${previous?.title ?: "none"} epoch=$epoch")
         proxyLoadJob = senderScope.launch {
             if (previous != null) {
-                runCatching { currentSession()?.remoteMediaClient?.stop() }
-                kotlinx.coroutines.withContext(Dispatchers.IO) { runCatching { hlsProxy.stop() } }
+                // Switch IN PLACE (session leftover 2026-10-12): no
+                // remoteMediaClient.stop() and no proxy teardown. The stop
+                // unloaded the receiver, which sat blank (IDLE) for the whole
+                // composite start. Now the proxy keeps its listener and ring
+                // and startLocalChannel runs as a channel change (new
+                // generation behind a discontinuity), the receiver keeps
+                // playing the old channel's buffered segments meanwhile, and
+                // the load below replaces the media on the SAME Cast session
+                // (a load on a live RemoteMediaClient never relaunches the
+                // receiver app).
+                Log.i(TAG, "[MV-CAST] ${previous.title} -> composite in place: same session, proxy channel change, no unload")
+                // Freeze the receiver's playlists on the old channel until
+                // the composite load below (it errored on the composite's
+                // segments otherwise; Nothing Phone 2026-10-12).
+                val held = runCatching { hlsProxy.holdPlaylists() }.getOrNull()
+                Log.i(TAG, "[MV-CAST] playlists held at gen=$held until the composite load")
                 lastLoadedMediaId = null
                 idleReloadAttempts = 0
             }
@@ -1625,6 +1639,7 @@ class AerioCastSender @Inject constructor(
             )
             pending = ready
             _content.value = ready
+            runCatching { hlsProxy.releasePlaylistHold() }
             currentSession()?.let { loadOnSession(it, ready) }
         }
     }
@@ -1672,8 +1687,6 @@ class AerioCastSender @Inject constructor(
         sendControl(CastControl.command(CastControl.CMD_SET_ASPECT) { put(CastControl.KEY_ASPECT, mode.key) })
 
     /** Toggle audio-only (drop the TV's video track) on the receiver. */
-    fun setRemoteAudioOnly(on: Boolean) =
-        sendControl(CastControl.command(CastControl.CMD_SET_AUDIO_ONLY) { put(CastControl.KEY_AUDIO_ONLY, on) })
 
     // GH #33 live-rewind controls: drive the receiver's timeshift buffer. The
     // receiver clamps to its own rewind window and echoes a fresh state snapshot.

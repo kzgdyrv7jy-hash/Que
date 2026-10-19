@@ -1,5 +1,6 @@
 package com.aeriotv.android
 
+import com.aeriotv.android.ui.theme.appBackground
 import android.app.PictureInPictureParams
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -78,7 +79,8 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Flipped true by [onKeyLongPress] when BACK is HELD on Android TV, to
-     * surface the "Would you like to close AerioTV?" confirm (issue #16: the
+     * surface the "Exit AerioTV?" confirm (also raised by the root Back
+     * fallback in onCreate) (issue #16: the
      * 0.3.0 short-Back rework removed the old exit popup). Read by the Compose
      * tree in [onCreate]; Cancel/dismiss sets it back to false, Close calls finish().
      */
@@ -141,6 +143,13 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Android#114: the Learn Button dialog takes the next learnable press.
+        com.aeriotv.android.core.remote.LearnedButtons.onCapture?.let { capture ->
+            if (com.aeriotv.android.core.remote.LearnedButtons.isLearnable(event.keyCode)) {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) capture(event.keyCode)
+                return true
+            }
+        }
         if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
             (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER) &&
             isTelevisionDevice()
@@ -161,6 +170,31 @@ class MainActivity : ComponentActivity() {
         // NowPlayingManager). Intercept it BEFORE the MediaSession would pause
         // playback, but only while the mini is Active on TV. Single BACK also
         // resumes (handled by the mini overlay's BackHandler).
+        // Radio Mode on the TV guide (Apple TV parity, the banner's buttons):
+        // Play/Pause switches to video, hold Right stops.
+        val radioOnGuide = isTelevisionDevice() &&
+            com.aeriotv.android.feature.player.RadioMode.isActive &&
+            miniPlayerSession.state.value !is MiniPlayerSession.State.Active &&
+            exoWindowState.mode.value != ExoWindowState.Mode.Fullscreen
+        if (radioOnGuide && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
+            (event.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || event.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY)
+        ) {
+            android.util.Log.i("AerioTV", "[RADIO] Play/Pause on guide -> Switch to Video Mode")
+            com.aeriotv.android.feature.player.RadioMode.requestReturn(this)
+            return true
+        }
+        if (radioOnGuide && event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && event.action == KeyEvent.ACTION_DOWN) {
+            if (android.os.SystemClock.uptimeMillis() < rightHoldPinUntil) return true
+            // Press-down of a possible hold: anchor the guide cell before the
+            // first Right moves it (restored after the radio stop).
+            if (event.repeatCount == 0) com.aeriotv.android.feature.player.RadioMode.captureGuideFocus?.invoke()
+            if (event.isLongPress || event.repeatCount >= MINI_CLOSE_HOLD_REPEAT) {
+                com.aeriotv.android.feature.player.RadioMode.stop(this, "hold-right")
+                rightHoldPinUntil = android.os.SystemClock.uptimeMillis() + RIGHT_HOLD_PIN_MS
+                return true
+            }
+            if (event.repeatCount >= 1) return true // held below threshold: hold position
+        }
         if (event.action == KeyEvent.ACTION_DOWN && isTelevisionDevice() &&
             (event.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
                 event.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) &&
@@ -173,12 +207,8 @@ class MainActivity : ComponentActivity() {
             when (remoteMap.guideAction(com.aeriotv.android.core.remote.RemoteSlot.PLAY_PAUSE)) {
                 com.aeriotv.android.core.remote.GuideRemoteAction.RESUME_PLAYER ->
                     miniPlayerSession.requestResume()
-                com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER -> {
-                    runCatching { miniPlayerSession.dismiss() }
-                    runCatching { exoWindowState.hide() }
-                    runCatching { exoHolder.stop() }
-                    AerioMediaPlaybackService.stop(this)
-                }
+                com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER ->
+                    closeTvMini("play-pause")
                 else -> { /* NONE or an action wired in Phase A2: no-op */ }
             }
             return true
@@ -220,12 +250,8 @@ class MainActivity : ComponentActivity() {
                     // for ANY mapped action so a still-held Right can't fly
                     // focus across the guide after the action fires.
                     when (rightLongAction) {
-                        com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER -> {
-                            runCatching { miniPlayerSession.dismiss() }
-                            runCatching { exoWindowState.hide() }
-                            runCatching { exoHolder.stop() }
-                            AerioMediaPlaybackService.stop(this)
-                        }
+                        com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER ->
+                            closeTvMini("hold-right")
                         com.aeriotv.android.core.remote.GuideRemoteAction.RESUME_PLAYER ->
                             miniPlayerSession.requestResume()
                         else -> Unit
@@ -384,6 +410,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        // Radio Mode (Android#127): Channel Up / Down switch the audio.
+        if (event.action == KeyEvent.ACTION_DOWN &&
+            (event.keyCode == KeyEvent.KEYCODE_CHANNEL_UP || event.keyCode == KeyEvent.KEYCODE_CHANNEL_DOWN) &&
+            com.aeriotv.android.feature.player.RadioMode.isActive &&
+            com.aeriotv.android.feature.player.RadioMode.step(
+                this, if (event.keyCode == KeyEvent.KEYCODE_CHANNEL_UP) 1 else -1,
+            )
+        ) return true
         // Remote Control A2: extended media keys while the fullscreen live
         // player is frontmost (BT/Shield/Onn remotes; the stock Google TV
         // remote lacks them). Slots per the plan's default map: FF/RW =
@@ -401,6 +435,10 @@ class MainActivity : ComponentActivity() {
             if (mediaSlot != null &&
                 dispatchPlayerAction(remoteMap.playerAction(mediaSlot))
             ) return true
+            // Android#114: a learned button's While Watching action.
+            com.aeriotv.android.core.remote.LearnedButtons.current[event.keyCode]?.let { b ->
+                if (event.repeatCount == 0 && dispatchPlayerAction(b.player)) return true
+            }
         }
         return super.dispatchKeyEvent(event)
     }
@@ -432,9 +470,30 @@ class MainActivity : ComponentActivity() {
             // Arm long-press tracking; the action is decided in onKeyLongPress
             // (resume) or onKeyUp (normal short back).
             event.startTracking()
+            if (event.repeatCount > 0) promoteArmedHoldToExit(event)
             return true
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    /** downTime of the Back hold that last raised the exit prompt. */
+    private var lastHoldBackDownTime = Long.MIN_VALUE
+
+    /** The guide's mapped Hold Back action; set by GuideScreen only while the
+     *  guide owns Back on TV and the backLong slot is not "Do nothing". */
+    var guideHoldBackAction: (() -> Unit)? = null
+
+    /** downTime of a Back hold armed for [guideHoldBackAction]. */
+    private var armedHoldBackDownTime = Long.MIN_VALUE
+
+    /** Raises the exit prompt for an armed hold that reached [EXIT_PROMPT_HOLD_MS]. */
+    private fun promoteArmedHoldToExit(event: KeyEvent): Boolean {
+        if (event.downTime != armedHoldBackDownTime) return false
+        if (event.eventTime - event.downTime < EXIT_PROMPT_HOLD_MS) return false
+        armedHoldBackDownTime = Long.MIN_VALUE
+        lastHoldBackDownTime = event.downTime
+        showExitPrompt("hold")
+        return true
     }
 
     override fun onKeyLongPress(keyCode: Int, event: KeyEvent): Boolean {
@@ -459,10 +518,35 @@ class MainActivity : ComponentActivity() {
             ) {
                 return true
             }
-            showExitConfirm.value = true
+            // One prompt and one log line per physical hold: the same held
+            // press reached this handler twice in the guide (Streamer
+            // 2026-10-14, two "source=hold" lines, same timestamp).
+            if (event.downTime == lastHoldBackDownTime) return true
+            // Guide Hold Back mapped (Logan 2026-10-15): the long-press only
+            // ARMS here. Released before EXIT_PROMPT_HOLD_MS it runs the mapped
+            // action (onKeyUp); held that long it raises the fixed Exit
+            // AerioTV? prompt instead (onKeyDown repeats). One press, one action.
+            if (guideHoldBackAction != null &&
+                exoWindowState.mode.value != com.aeriotv.android.feature.player.ExoWindowState.Mode.Fullscreen
+            ) {
+                armedHoldBackDownTime = event.downTime
+                return true
+            }
+            lastHoldBackDownTime = event.downTime
+            showExitPrompt("hold")
             return true
         }
         return super.onKeyLongPress(keyCode, event)
+    }
+
+    /** Raised by a screen whose own Back ladder has ended (the guide at now
+     *  and the top row), so it reaches the same Exit AerioTV? confirm. */
+    fun requestExitPrompt(source: String) = showExitPrompt(source)
+
+    private fun showExitPrompt(source: String) {
+        if (showExitConfirm.value) return
+        android.util.Log.i("AerioTV", "[BACK] exit prompt shown source=$source")
+        showExitConfirm.value = true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
@@ -470,7 +554,14 @@ class MainActivity : ComponentActivity() {
             // A handled long-press cancels this up -> ignore it. Otherwise it's
             // a short press: run the normal back through the dispatcher so the
             // existing BackHandlers / nav still work.
-            if (event.isCanceled) return true
+            if (event.isCanceled) {
+                if (event.downTime == armedHoldBackDownTime && !promoteArmedHoldToExit(event)) {
+                    armedHoldBackDownTime = Long.MIN_VALUE
+                    android.util.Log.i("AerioTV", "[BACK] guide Hold Back mapped action")
+                    guideHoldBackAction?.invoke()
+                }
+                return true
+            }
             onBackPressedDispatcher.onBackPressed()
             return true
         }
@@ -584,7 +675,9 @@ class MainActivity : ComponentActivity() {
      * so the mini-player keeps playing -- only a real leave triggers this.
      */
     override fun onStop() {
-        if (isTelevisionDevice() && !isChangingConfigurations) {
+        if (isTelevisionDevice() && !isChangingConfigurations &&
+            !com.aeriotv.android.feature.player.RadioMode.isActive
+        ) {
             android.util.Log.i("AerioLeave", "onStop: TV leave -> stopping playback")
             stopTvPlaybackOnLeave("onStop")
         }
@@ -615,10 +708,30 @@ class MainActivity : ComponentActivity() {
      * Multiview then exits on return, the same end state as a Cast stop, so
      * the user never comes back to a grid of stopped tiles.
      */
-    private fun stopTvPlaybackOnLeave(from: String) {
+    /**
+     * TV mini player close (hold-Right, a Play/Pause mapped to Close mini
+     * player, the guide's mapped close). Same teardown as before, then the
+     * phone mini X's Keep Recent Channels Live decision
+     * ([com.aeriotv.android.core.timeshift.TimeshiftController.onMiniClosed]),
+     * AFTER the holder stops so only one connection is open at a time.
+     */
+    fun closeTvMini(via: String) {
+        android.util.Log.i("AerioTV", "[RETAIN] TV mini close via $via")
         runCatching { miniPlayerSession.dismiss() }
         runCatching { exoWindowState.hide() }
         runCatching { exoHolder.stop() }
+        AerioMediaPlaybackService.stop(this)
+        runCatching { timeshiftController.onMiniClosed(via) }
+    }
+
+    private fun stopTvPlaybackOnLeave(from: String) {
+        val miniWasActive = miniPlayerSession.state.value is MiniPlayerSession.State.Active
+        runCatching { miniPlayerSession.dismiss() }
+        runCatching { exoWindowState.hide() }
+        runCatching { exoHolder.stop() }
+        // Leaving the app is not an exit for Keep Recent Channels Live (see
+        // onStop): a mini that was up keeps its channel like the mini's close.
+        if (miniWasActive) runCatching { timeshiftController.onMiniClosed("tv-leave ($from)") }
         if (!com.aeriotv.android.feature.multiview.MultiviewTilePlayers.isEmpty) {
             com.aeriotv.android.feature.multiview.MultiviewTilePlayers.stopAll("TV leave ($from)")
             deepLinkTarget.value = DeepLinkTarget.ExitPlayer
@@ -641,6 +754,14 @@ class MainActivity : ComponentActivity() {
             // destroy()) so a quick relaunch reuses the holder. Same teardown
             // order as the X-close path. Must be FIRST so it short-circuits the
             // audio-only + API<31 video branches on TV.
+            // Radio Mode on TV stops when the app leaves the foreground, the
+            // same as Apple TV (owner decision 2026-10-14). Phones and tablets
+            // keep playing in the background with the media notification
+            // (Android#127).
+            com.aeriotv.android.feature.player.RadioMode.isActive && isTelevisionDevice() ->
+                com.aeriotv.android.feature.player.RadioMode.stop(this, "app backgrounded, TV")
+            com.aeriotv.android.feature.player.RadioMode.isActive ->
+                AerioMediaPlaybackService.startBackground(this)
             isTelevisionDevice() -> stopTvPlaybackOnLeave("onUserLeaveHint")
             // Audio-only: never enter PiP. Keep a foreground media notification
             // alive so audio continues with status-bar + lock-screen controls.
@@ -665,6 +786,7 @@ class MainActivity : ComponentActivity() {
         // config-change recreation doesn't kill playback; HOME / leave keeps
         // playing via onUserLeaveHint, which does NOT finish the activity.
         if (isFinishing) {
+            runCatching { com.aeriotv.android.feature.player.RadioMode.stop(this, "app exit") }
             runCatching { miniPlayerSession.dismiss() }
             runCatching { exoWindowState.hide() }
             runCatching { exoHolder.destroy() }
@@ -755,13 +877,16 @@ class MainActivity : ComponentActivity() {
     // already on their content rate before the first tune; #40 switches to the
     // content's resolution class so the TV does the upscaling. Distinct from
     // the FORBIDDEN frame-rate-matching pin (25Hz-override regression): these
-    // are explicit user choices, default off, and never driven by content
-    // frame rate. Playback-time refresh matching stays with the
-    // framework-arbitrated Surface.setFrameRate path.
+    // are explicit user choices, default off. Match Frame Rate (Android#134)
+    // pins only the 50 / 59.94 / 60 class at the CURRENT size; it never
+    // requests a sub-mode rate. The framework-arbitrated Surface.setFrameRate
+    // hint (API 31+) still runs alongside.
     // ------------------------------------------------------------------
 
     /** True while GH #40 matching is enabled in Settings. */
     private var matchContentResolutionEnabled = false
+    /** Android#134: refresh-rate matching, independent of resolution. */
+    private var matchFrameRateEnabled = false
     /** Non-zero once #40 switched the mode; cleared on restore. */
     private var resolutionModeApplied = false
     private var resMatchListener: androidx.media3.common.Player.Listener? = null
@@ -817,8 +942,9 @@ class MainActivity : ComponentActivity() {
      *  3:2 cadence that reads as slow motion - Logan, Streamer 2026-09-02). */
     private fun onContentRateRequested(rate: Float) {
         lastContentRate = rate
-        if (!matchContentResolutionEnabled || !isTelevisionDevice()) return
-        if (resolutionMatchUnsupported) return
+        // Android#134: gated by Match Frame Rate alone. The mode pick below
+        // keeps the current physical size, so this never changes resolution.
+        if (!matchFrameRateEnabled || !isTelevisionDevice()) return
         val player = resMatchPlayer ?: return
         if (!player.playWhenReady) return
         val disp = currentDisplay() ?: return
@@ -975,6 +1101,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Root Back fallback (Logan 2026-10-14): registered FIRST and without
+        // a lifecycle owner, so it sits at the bottom of the dispatcher stack
+        // for the Activity's life. Every Compose BackHandler (tab ladders,
+        // sheets, the guide's back-to-top, the player minimize) and the
+        // NavHost pop run before it; a Back that none of them consumes lands
+        // here and raises the Exit AerioTV? confirm instead of the default
+        // finish. Phone, tablet, and TV alike.
+        onBackPressedDispatcher.addCallback(object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                showExitPrompt("back")
+            }
+        })
         // Fresh launch only: hold tab content off focus until the top bar's
         // cold-start pull lands on the landing tab's pill.
         com.aeriotv.android.ui.tv.TvColdStartFocus.pending = savedInstanceState == null
@@ -997,9 +1135,17 @@ class MainActivity : ComponentActivity() {
                     com.aeriotv.android.core.remote.RemoteSlot.RIGHT_SHORT,
                     com.aeriotv.android.core.remote.RemoteSlot.RIGHT_LONG,
                 )
-                com.aeriotv.android.feature.player.VodHiddenChromeScrub.customHorizontalMap =
-                    map.preset == com.aeriotv.android.core.remote.RemotePreset.CUSTOM &&
+                val custom = map.preset == com.aeriotv.android.core.remote.RemotePreset.CUSTOM &&
                     slots.any { map.playerAction(it) != defaults.playerAction(it) }
+                com.aeriotv.android.feature.player.VodHiddenChromeScrub.customLeftShort =
+                    if (custom) map.playerAction(com.aeriotv.android.core.remote.RemoteSlot.LEFT_SHORT) else null
+                com.aeriotv.android.feature.player.VodHiddenChromeScrub.customRightShort =
+                    if (custom) map.playerAction(com.aeriotv.android.core.remote.RemoteSlot.RIGHT_SHORT) else null
+            }
+        }
+        lifecycleScope.launch {
+            appPreferences.learnedRemoteButtons.collect {
+                com.aeriotv.android.core.remote.LearnedButtons.current = it
             }
         }
         lifecycleScope.launch {
@@ -1041,9 +1187,26 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             appPreferences.matchContentResolution.collect { enabled ->
                 matchContentResolutionEnabled = enabled
-                if (!enabled) restoreDisplayMode()
-                else resMatchPlayer?.videoSize?.let { vs ->
+                if (!enabled) {
+                    restoreDisplayMode()
+                    // Rate matching survives on its own (Android#134).
+                    if (lastContentRate > 0f) onContentRateRequested(lastContentRate)
+                } else resMatchPlayer?.videoSize?.let { vs ->
                     if (vs.height > 0) applyContentResolutionMode(vs.width, vs.height)
+                }
+            }
+        }
+        lifecycleScope.launch {
+            appPreferences.matchFrameRate.collect { enabled ->
+                matchFrameRateEnabled = enabled
+                if (!enabled) {
+                    restoreDisplayMode()
+                    // Resolution matching survives on its own.
+                    resMatchPlayer?.videoSize?.let { vs ->
+                        if (vs.height > 0) applyContentResolutionMode(vs.width, vs.height)
+                    }
+                } else if (lastContentRate > 0f) {
+                    onContentRateRequested(lastContentRate)
                 }
             }
         }
@@ -1255,7 +1418,7 @@ class MainActivity : ComponentActivity() {
                 trueBlack = trueBlack,
             ) {
                 Surface(
-                    modifier = Modifier.fillMaxSize().background(com.aeriotv.android.ui.theme.appBackgroundBrush()),
+                    modifier = Modifier.fillMaxSize().appBackground(),
                     color = androidx.compose.ui.graphics.Color.Transparent,
                     contentColor = MaterialTheme.colorScheme.onBackground,
                 ) {
@@ -1299,22 +1462,37 @@ class MainActivity : ComponentActivity() {
                                 deepLinkTarget = deepLinkTarget.value,
                                 onDeepLinkConsumed = { deepLinkTarget.value = null },
                             )
-                            // Issue #16: long-press BACK on Android TV opens this
-                            // confirm (onKeyLongPress flips showExitConfirm). Rendered
-                            // as a sibling of the NavHost so it overlays every screen.
+                            // Exit AerioTV? confirm (Logan 2026-10-14): raised by the
+                            // root Back fallback registered in onCreate (any Back no
+                            // screen consumed, every form factor) and by a held Back
+                            // on Android TV (issue #16). Sibling of the NavHost so it
+                            // overlays every screen. Cancel (appended by the dialog,
+                            // initial D-pad focus) dismisses; Exit finishes.
                             if (showExitConfirm.value) {
                                 val exitGuard = rememberTvMenuGuard()
                                 TvActionMenuDialog(
-                                    title = "Would you like to close AerioTV?",
+                                    title = "Exit AerioTV?",
                                     guard = exitGuard,
-                                    onDismiss = { showExitConfirm.value = false },
-                                    // TvActionMenuDialog appends its own Cancel row.
+                                    focusCancel = true,
+                                    onDismiss = {
+                                        // The dialog calls onDismiss before an action's
+                                        // onClick, so decide "cancelled" a frame later.
+                                        if (showExitConfirm.value) {
+                                            window.decorView.post {
+                                                if (!isFinishing) android.util.Log.i("AerioTV", "[BACK] exit cancelled")
+                                            }
+                                        }
+                                        showExitConfirm.value = false
+                                    },
                                     actions = listOf(
                                         TvMenuAction(
-                                            label = "Close AerioTV",
+                                            label = "Exit",
                                             icon = Icons.Outlined.Close,
                                             destructive = true,
-                                            onClick = { finish() },
+                                            onClick = {
+                                                android.util.Log.i("AerioTV", "[BACK] exit confirmed")
+                                                finish()
+                                            },
                                         ),
                                     ),
                                 )
@@ -1347,6 +1525,10 @@ class MainActivity : ComponentActivity() {
          *  HOLD_LEFT_ALL_PILL_REPEAT (Android starts auto-repeating ~400ms after
          *  the press, so 4 repeats is ~0.5s -- a hold, not a tap). */
         const val MINI_CLOSE_HOLD_REPEAT = 4
+
+        /** With the guide's Hold Back mapped, the Exit AerioTV? prompt moves
+         *  to this longer hold; the mapped action runs on a shorter one. */
+        const val EXIT_PROMPT_HOLD_MS = 1_500L
 
         /** How long (ms) a held D-pad Right stays pinned after it closed the mini
          *  player, so the still-held Right holds guide focus in place until the

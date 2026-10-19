@@ -47,7 +47,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.aeriotv.android.ui.AerioTextButton as TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -355,7 +355,8 @@ fun DvrMediaTabContent(
         return buildList {
             add(com.aeriotv.android.core.tv.TvMenuAction("Program Info") { showInfo(rec) })
             if (s == DvrViewModel.Recording.Status.Completed || s == DvrViewModel.Recording.Status.Stopped) {
-                add(com.aeriotv.android.core.tv.TvMenuAction("Play") { play(rec) })
+                // Apple parity: same label and action as the card's primary button.
+                add(com.aeriotv.android.core.tv.TvMenuAction(if (progressOf(rec) > 0f) "Resume" else "Play") { play(rec) })
                 if (isServer) {
                     add(com.aeriotv.android.core.tv.TvMenuAction("Watch from Beginning") { playFromStart(rec) })
                     // Save to Device is a read (GET the file), never gated.
@@ -367,6 +368,9 @@ fun DvrMediaTabContent(
             }
             if (s == DvrViewModel.Recording.Status.Recording) {
                 if (rec.inProgressUrl != null) {
+                    // Apple parity: saved progress offers Resume first (play()
+                    // on an in-progress row resumes the saved position).
+                    if (progressOf(rec) > 0f) add(com.aeriotv.android.core.tv.TvMenuAction("Resume") { play(rec) })
                     add(com.aeriotv.android.core.tv.TvMenuAction("Start at Live") { jumpToLive(rec) })
                     add(com.aeriotv.android.core.tv.TvMenuAction("Watch from Beginning") { playFromStart(rec) })
                 }
@@ -444,6 +448,7 @@ fun DvrMediaTabContent(
                 onPlay = ::play, onPlayFromStart = ::playFromStart, onJumpToLive = ::jumpToLive,
                 onStop = { rec -> scope.launch { viewModel.stopRecording(rec) } }, onInfo = ::showInfo,
                 isLoading = state.isLoading,
+                onRefresh = { viewModel.refresh() },
                 canManageDvr = canManageDvr,
             )
         } else
@@ -750,6 +755,7 @@ private fun TvDvrPage(
     onStop: (Rec) -> Unit,
     onInfo: (Rec) -> Unit,
     isLoading: Boolean,
+    onRefresh: () -> Unit,
     /** Capability.CanManageDvr: a "view" account never sees Stop Recording. */
     canManageDvr: Boolean = true,
 ) {
@@ -872,6 +878,7 @@ private fun TvDvrPage(
         headerTitle = if (isSearching) "Results" else "All Recordings",
         headerCount = filteredLibrary.size,
         columns = 5,
+        onRefresh = onRefresh,
         onFilter = onFilter,
         filterActive = filterActive,
         searchEnabled = true,

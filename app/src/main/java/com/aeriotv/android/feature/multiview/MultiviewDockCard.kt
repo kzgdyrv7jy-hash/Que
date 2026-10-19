@@ -28,7 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.aeriotv.android.ui.AerioTextButton as TextButton
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,8 +55,10 @@ import com.aeriotv.android.ui.theme.textAccent
 
 private const val MV_TAG = "AerioCast"
 
-/** Background Multiview dock card title (shared wording with Apple). */
-const val MULTIVIEW_BACKGROUND_TITLE = "Multiview playing in background"
+/** Background Multiview dock card and TV banner title (shared wording with
+ *  Apple): "Multiview playing in background, N channels". */
+fun multiviewBackgroundTitle(count: Int): String =
+    "Multiview playing in background, $count " + if (count == 1) "channel" else "channels"
 
 /** "1 channel staged for Multiview" / "N channels staged for Multiview". */
 fun multiviewStagedTitle(count: Int): String =
@@ -136,7 +138,7 @@ fun MultiviewDockCard(
 
 /** Accent text control, the dock cards' trailing action. */
 @Composable
-private fun AccentTextControl(label: String, onClick: () -> Unit) {
+internal fun AccentTextControl(label: String, onClick: () -> Unit) {
     Text(
         text = label,
         style = MaterialTheme.typography.labelLarge,
@@ -419,3 +421,9 @@ private fun StagedRows(
         }
     }
 }
+
+/** Radio Mode card subtitle (Apple wording). */
+const val RADIO_SUBTITLE = "Playing in Radio Mode"
+
+/** Radio Mode status while the stream failed: the player overlay's wording. */
+const val RADIO_UNAVAILABLE = "Channel Unavailable"

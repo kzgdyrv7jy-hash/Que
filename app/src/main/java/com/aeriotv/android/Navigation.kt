@@ -837,7 +837,7 @@ fun AerioTVNavHost(
                             )
                         },
                         confirmButton = {
-                            androidx.compose.material3.TextButton(
+                            com.aeriotv.android.ui.AerioTextButton(
                                 onClick = { welcomeNotConfiguredDialog = false },
                             ) { androidx.compose.material3.Text("Got it") }
                         },
@@ -912,6 +912,13 @@ fun AerioTVNavHost(
                     hiltViewModel()
                 val tuneStartsInMini by tuneSettingsVm.guideTuneInMini
                     .collectAsStateWithLifecycle(initialValue = false)
+                // Settings > Player > Radio Mode by Default, mirrored for the
+                // synchronous pick decision in RadioSelect.maybeOpen.
+                LaunchedEffect(tuneSettingsVm) {
+                    tuneSettingsVm.radioModeByDefault.collect {
+                        com.aeriotv.android.feature.player.RadioSelect.byDefault = it
+                    }
+                }
                 val playerEntryNav = remember {
                     dagger.hilt.android.EntryPointAccessors.fromApplication(
                         context.applicationContext,
@@ -968,7 +975,29 @@ fun AerioTVNavHost(
                 // One channel play path. forceLocal=false is the original
                 // behavior (companion, then cast, then local); true is
                 // PlayWhereRouter's Play Here.
+                com.aeriotv.android.feature.player.RadioMode.headersProvider =
+                    { PlaybackHeaders.forPlaylist(state.playlist) }
+                com.aeriotv.android.feature.player.RadioMode.neighborProvider = { cur, delta ->
+                    val list = state.channels.filter { it.url.isNotBlank() }
+                    val i = list.indexOfFirst { it.id == cur.id }
+                    if (i < 0 || list.isEmpty()) null else list[(i + delta).mod(list.size)]
+                }
                 val channelPlay: (M3UChannel, Boolean) -> Unit = channelPlay@{ channel, forceLocal ->
+                    // Radio Mode (Android#127): a channel pick switches the
+                    // audio and never opens the video player.
+                    if (com.aeriotv.android.feature.player.RadioMode.isActive && channel.url.isNotBlank() &&
+                        castSenderNav.state.value !is com.aeriotv.android.core.cast.AerioCastSender.State.Connected
+                    ) {
+                        com.aeriotv.android.feature.player.RadioMode.switchTo(
+                            navHostContext,
+                            channel,
+                            PlaybackHeaders.forPlaylist(state.playlist),
+                            state.epgByChannel[channel.guideMatchKey]?.nowPlaying()?.title.orEmpty(),
+                        )
+                        tuneSettingsVm.setLastWatchedChannelId(channel.id)
+                        tuneSettingsVm.recordRecentChannel(channel.id)
+                        return@channelPlay
+                    }
                     // Cast card UX rule 5 (Logan 2026-09-12): while a session
                     // is active a channel tap CASTS it and stays on the page.
                     // No player, no controls screen; the cast card above the
@@ -1105,6 +1134,21 @@ fun AerioTVNavHost(
                         // still prompts (the router names it "TV").
                         val liveCast = castSenderNav.state.value as?
                             com.aeriotv.android.core.cast.AerioCastSender.State.Connected
+                        // A server-declared radio channel opens Radio Mode
+                        // (same entry as the long-press item). Casting, the
+                        // companion link, a Multiview, and the menu's Watch
+                        // keep today's path.
+                        if (liveCast == null && companionTvName == null &&
+                            com.aeriotv.android.feature.player.RadioSelect.maybeOpen(
+                                navHostContext,
+                                channel,
+                                state.epgByChannel[channel.guideMatchKey]?.nowPlaying()?.title.orEmpty(),
+                            ) { miniVmNav.dismiss() }
+                        ) {
+                            tuneSettingsVm.setLastWatchedChannelId(channel.id)
+                            tuneSettingsVm.recordRecentChannel(channel.id)
+                            return@MainScaffold
+                        }
                         android.util.Log.i(
                             "AerioCast",
                             "CastPlayWhere: channel tap ${channel.name} session=${liveCast != null} companion=${companionTvName != null}",
@@ -1717,6 +1761,11 @@ fun AerioTVNavHost(
                             navController.popBackStack()
                         }
                     },
+                    onPlaySingleChannel = { channelId ->
+                        navController.navigate(Routes.player(channelId)) {
+                            popUpTo(Routes.MULTIVIEW) { inclusive = true }
+                        }
+                    },
                     httpHeaders = headers,
                     // Pass the PLAYLIST_GRAPH-scoped VM so the re-entrant
                     // "Add streams" picker reuses this single instance.
@@ -2139,7 +2188,9 @@ fun AerioTVNavHost(
             onResume = {
                 val resumed = miniPlayerVm.resumeChannel()
                 if (resumed != null) {
-                    navController.navigate(Routes.player(resumed.id))
+                    // Single top: a repeated expand must never stack a
+                    // second player route over the first.
+                    navController.navigate(Routes.player(resumed.id)) { launchSingleTop = true }
                 }
             },
             onJumpToTop = {
@@ -2148,6 +2199,13 @@ fun AerioTVNavHost(
                 miniPlayerVm.session.requestGuideTop()
             },
         )
+        // Radio Mode "Return to Channel": the holder is still playing the
+        // channel, so the player adopts it with no re-tune.
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            com.aeriotv.android.feature.player.RadioMode.returnRequests.collect { ch ->
+                runCatching { navController.navigate(Routes.player(ch.id)) { launchSingleTop = true } }
+            }
+        }
         // Double-press D-pad Select event - MainActivity emits into the
         // session's resumeRequests flow; this collects and re-pushes the
         // PLAYER route. Belongs at the NavController scope, hence here.
@@ -2166,7 +2224,7 @@ fun AerioTVNavHost(
                     "MiniPlayerResume",
                     "NavHost received resume for channel id=${channel.id}; navigating to PLAYER",
                 )
-                runCatching { navController.navigate(Routes.player(channel.id)) }
+                runCatching { navController.navigate(Routes.player(channel.id)) { launchSingleTop = true } }
                     .onFailure {
                         android.util.Log.e(
                             "MiniPlayerResume",

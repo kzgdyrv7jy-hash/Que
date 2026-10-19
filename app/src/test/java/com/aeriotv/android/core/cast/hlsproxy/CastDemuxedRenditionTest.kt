@@ -41,8 +41,8 @@ import org.junit.Test
  */
 class CastDemuxedRenditionTest {
 
-    private val ffmpeg = File("/opt/homebrew/bin/ffmpeg")
-    private val ffprobe = File("/opt/homebrew/bin/ffprobe")
+    private val ffmpeg = hostMediaTool("ffmpeg")
+    private val ffprobe = hostMediaTool("ffprobe")
     private val chrome = File("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
     /** The real-world fixture: 60 s of a live ESPNU feed through

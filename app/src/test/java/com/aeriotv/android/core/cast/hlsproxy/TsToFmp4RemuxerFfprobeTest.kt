@@ -29,8 +29,8 @@ import org.junit.Test
  */
 class TsToFmp4RemuxerFfprobeTest {
 
-    private val ffmpeg = File("/opt/homebrew/bin/ffmpeg")
-    private val ffprobe = File("/opt/homebrew/bin/ffprobe")
+    private val ffmpeg = hostMediaTool("ffmpeg")
+    private val ffprobe = hostMediaTool("ffprobe")
 
     private val workDir: File by lazy {
         File("build/tmp/castHlsProxyFfprobe").apply { mkdirs() }

@@ -22,7 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import com.aeriotv.android.ui.scale.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.aeriotv.android.ui.AerioTextButton as TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect

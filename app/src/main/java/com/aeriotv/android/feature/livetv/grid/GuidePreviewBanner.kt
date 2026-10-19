@@ -3,6 +3,7 @@ package com.aeriotv.android.feature.livetv.grid
 import com.aeriotv.android.ui.scale.subtext
 import com.aeriotv.android.ui.theme.textAccent
 import com.aeriotv.android.ui.theme.forText
+import com.aeriotv.android.ui.theme.isQueTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -143,6 +144,22 @@ fun GuidePreviewBanner(
     miniActive: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
+    if (isQueTheme()) {
+        QueGuidePreview(
+            program = program,
+            channel = channel,
+            nowMs = nowMs,
+            onOpenInfo = onOpenInfo,
+            descriptionFocus = descriptionFocus,
+            downTarget = downTarget,
+            upTarget = upTarget,
+            onDescriptionFocusChanged = onDescriptionFocusChanged,
+            onDown = onDown,
+            miniActive = miniActive,
+            modifier = modifier,
+        )
+        return
+    }
     val context = LocalContext.current
     val artKey = program?.let { p -> p.dispatcharrProgramId?.let { "pid:$it" } ?: ("t:" + cleanPreviewTitle(p.title)) }
     LaunchedEffect(artKey) {
@@ -165,20 +182,28 @@ fun GuidePreviewBanner(
                 // after launch. Do not cache a miss for that; retry next time.
                 detailSkipped = true
             } else {
-                url = runCatching {
-                    withContext(Dispatchers.IO) {
-                        val broker = entry.dispatcharrAuth()
-                        val client = entry.dispatcharrClient()
-                        broker.withApiKeyRetry(playlistId) { k ->
-                            client.getProgramDetail(base, k, pid).bestPosterString?.let { raw ->
-                                resolvePreviewArtUrl(raw, base)
-                            }
-                        }
-                    }
+                // A failed detail lookup (a 404 for a regenerated program id
+                // that could not be re-resolved, or any network error) is
+                // never cached as "no art"; the next focus retries.
+                val result = runCatching {
+                    com.aeriotv.android.feature.livetv.fetchProgramDetailResolving(
+                        entry, base, playlistId, pid,
+                        listOfNotNull(p.channelId, channel?.tvgID),
+                        p.startMillis, p.title,
+                    )
                 }.getOrNull()
+                if (result == null || result.failed) detailSkipped = true
+                url = result?.detail?.bestPosterString?.let { raw -> resolvePreviewArtUrl(raw, base) }
             }
         }
-        if (url == null && p.title.isNotBlank() && playlist.programPostersTmdbEnabled.first()) {
+        // Order on every art surface: server detail icon, then the program's
+        // OWN feed icon (XMLTV `<icon src>`), then TMDB by title only when
+        // both are empty. Sports events match nothing useful on TMDB (an
+        // NFL pregame matched an unrelated movie poster, Onn 2026-10-12).
+        if (url == null) url = p.iconUrl?.takeIf { it.isNotBlank() }
+        // A failed detail lookup never falls through to TMDB: the right art
+        // may arrive on the next try, and a TMDB guess would be cached.
+        if (url == null && !detailSkipped && p.title.isNotBlank() && playlist.programPostersTmdbEnabled.first()) {
             val apiKey = playlist.tmdbApiKey.first()
             if (apiKey.isNotBlank()) {
                 val isMovie = p.category.lowercase().let { it.contains("movie") || it.contains("film") }
@@ -197,12 +222,9 @@ fun GuidePreviewBanner(
                 }.getOrNull()
             }
         }
-        // Last stop: the program's OWN icon from the feed (XMLTV `<icon src>`).
-        // Sports events ("Tomorrow at 21:00 - Villarreal v Real Betis") match
-        // nothing on TMDB, but the feed ships a real picture for them.
-        if (url == null) url = p.iconUrl?.takeIf { it.isNotBlank() }
-        // A miss caused by the skipped detail step is not final.
-        if (url != null || !detailSkipped) previewArt[key] = url
+        // Nothing is cached after a skipped or failed detail step, so the
+        // next focus asks the server again.
+        if (!detailSkipped) previewArt[key] = url
     }
     val art = artKey?.let { previewArt[it] }
     val artKnown = artKey != null && previewArt.containsKey(artKey)
@@ -283,16 +305,19 @@ fun GuidePreviewBanner(
                     .padding(end = if (miniActive) 211.dp else 0.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                // tvOS: title and channel name share the first text baseline.
-                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text(
-                        program.title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = colors.onBackground,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false).alignByBaseline(),
-                    )
-                    if (channel != null) {
-                        Text(channel.name, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = colors.textAccent, maxLines = 1, modifier = Modifier.alignByBaseline())
-                    }
+                // Apple parity (2026-10-12): the title wraps to 2 lines and the
+                // channel name sits on its own line under it (long Teamarr
+                // titles were cut short sharing one line with the channel).
+                // The banner height stays fixed, so a 2-line title takes its
+                // extra line from the description and nothing below moves.
+                var titleLines by remember(program.title) { androidx.compose.runtime.mutableIntStateOf(1) }
+                Text(
+                    program.title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = colors.onBackground,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    onTextLayout = { titleLines = it.lineCount },
+                )
+                if (channel != null) {
+                    Text(channel.name, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = colors.textAccent, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 val sub = program.subTitle?.takeIf { !subtitleIsRedundant(it, program.title, program.description) }
                 if (sub != null) {
@@ -329,8 +354,10 @@ fun GuidePreviewBanner(
                         // baseline), so large Text Sizes trade a description
                         // line for room instead of pushing the title out the top.
                         color = colors.onBackground.copy(alpha = 0.85f).forText(),
+                        // Up to 2 lines (Apple), 1 when the title wrapped or
+                        // a large Text Size needs the room.
                         maxLines = (androidx.compose.ui.platform.LocalDensity.current.fontScale * com.aeriotv.android.ui.scale.LocalSubtextScale.current).let { fs ->
-                            when { fs >= 1.35f -> 1; fs >= 1.1f -> 2; else -> 3 }
+                            if (fs >= 1.1f || titleLines > 1) 1 else 2
                         },
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier

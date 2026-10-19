@@ -11,7 +11,9 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
+import com.aeriotv.android.ui.theme.isQueTheme
 
 /**
  * Whether Live TV renders the dense channel List or the time-x-channels Guide grid.
@@ -20,6 +22,9 @@ import androidx.compose.ui.platform.LocalContext
  * the user choice survives cold starts.
  */
 enum class LiveTVViewMode { List, Guide }
+
+/** Que's Live TV and Guide rail entries share a session-only view choice. */
+val LocalLiveTvSessionMode = staticCompositionLocalOf<MutableState<LiveTVViewMode>?> { null }
 
 /**
  * Form-factor decision matching iOS ChannelListView dispatcher
@@ -36,18 +41,20 @@ enum class LiveTVViewMode { List, Guide }
 data class LiveTvFormFactor(
     val widthClass: WindowWidthSizeClass,
     val isTv: Boolean,
+    val allowTvList: Boolean = false,
 ) {
     /** Phone-class layout: List is the default, but the toggle is still offered. */
     val isCompactPhone: Boolean get() = widthClass == WindowWidthSizeClass.Compact && !isTv
 
     /**
      * Whether the List view exists at all on this form factor. TV drops it
-     * entirely (Logan 2026-09-16: unusable with a remote) unless
+     * entirely (Logan 2026-09-16: unusable with a remote) unless the Que shell
+     * supplies its separate List/Guide rail or
      * [com.aeriotv.android.core.ui.TvListView.ENABLED] is flipped back on.
-     * Phone and tablet always have it.
+     * Phone and tablet always have it; other TV themes retain the upstream gate.
      */
     val listAvailable: Boolean
-        get() = !isTv || com.aeriotv.android.core.ui.TvListView.ENABLED
+        get() = !isTv || allowTvList || com.aeriotv.android.core.ui.TvListView.ENABLED
 
     /**
      * Whether the user can flip between List and Guide. Always true: compact
@@ -67,6 +74,7 @@ data class LiveTvFormFactor(
         get() = when {
             !listAvailable -> LiveTVViewMode.Guide
             isCompactPhone -> LiveTVViewMode.List
+            isTv && allowTvList -> LiveTVViewMode.List
             isTv -> LiveTVViewMode.Guide
             widthClass == WindowWidthSizeClass.Expanded -> LiveTVViewMode.Guide
             else -> LiveTVViewMode.List
@@ -85,7 +93,8 @@ fun rememberLiveTvFormFactor(): LiveTvFormFactor {
     }
     val uiMode = context.resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK
     val isTv = uiMode == Configuration.UI_MODE_TYPE_TELEVISION
-    return remember(widthClass, isTv) { LiveTvFormFactor(widthClass, isTv) }
+    val allowTvList = isTv && isQueTheme()
+    return remember(widthClass, isTv, allowTvList) { LiveTvFormFactor(widthClass, isTv, allowTvList) }
 }
 
 @Composable

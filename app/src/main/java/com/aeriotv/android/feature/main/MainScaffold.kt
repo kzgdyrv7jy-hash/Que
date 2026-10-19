@@ -2,6 +2,11 @@ package com.aeriotv.android.feature.main
 
 import com.aeriotv.android.core.data.db.entity.canSwitchStream
 import com.aeriotv.android.ui.theme.textAccent
+import com.aeriotv.android.ui.theme.AppTheme
+import com.aeriotv.android.ui.theme.LocalAppTheme
+import com.aeriotv.android.ui.theme.LocalIsDarkTheme
+import com.aeriotv.android.ui.theme.LocalTrueBlack
+import com.aeriotv.android.ui.theme.appBackground
 import kotlinx.coroutines.launch
 import com.aeriotv.android.core.data.db.entity.dispatcharrCanViewDvr
 import com.aeriotv.android.core.data.db.entity.dispatcharrCanViewVod
@@ -107,6 +112,8 @@ import com.aeriotv.android.feature.dvr.DvrViewModel
 import com.aeriotv.android.feature.favorites.FavoritesTabContent
 import com.aeriotv.android.feature.favorites.FavoritesViewModel
 import com.aeriotv.android.feature.livetv.LiveTVTabContent
+import com.aeriotv.android.feature.livetv.LiveTVViewMode
+import com.aeriotv.android.feature.livetv.LocalLiveTvSessionMode
 import com.aeriotv.android.feature.livetv.rememberLiveTvFormFactor
 import com.aeriotv.android.feature.miniplayer.MiniPlayerRow
 import com.aeriotv.android.feature.miniplayer.MiniPlayerSession
@@ -938,22 +945,18 @@ fun MainScaffold(
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_START) {
-                // Quiet EPG sweep (Logan 2026-09-12): the sweep only spends
-                // requests while the app is in the foreground, and a return to
-                // the foreground is also when the sources gate is re-checked
-                // (rate limited to once per 15 min in the repository).
-                com.aeriotv.android.core.data.repository.EpgSweepGate.appInForeground = true
+                // EpgSweepGate.appInForeground follows the process lifecycle
+                // (Android#131): this destination's lifecycle reads STOPPED
+                // while the full-screen player route is on top. A return here
+                // re-checks the sources gate (rate limited in the repository)
+                // and repaints a guide a background trim shed.
+                viewModel.repaintGuideIfShed("main-start")
                 if (sawFirstStart) {
                     viewModel.refreshEpgIfStale()
                     viewModel.checkEpgSourcesForChanges()
                 } else {
                     sawFirstStart = true
                 }
-            }
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
-                // Backgrounded: the sweep pauses where it is and resumes at the
-                // same chunk on the next ON_START.
-                com.aeriotv.android.core.data.repository.EpgSweepGate.appInForeground = false
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -980,6 +983,15 @@ fun MainScaffold(
     // tvOS TabView. Phone / tablet / fold keep the bottom nav below.
     val isTv = rememberLiveTvFormFactor().isTv
     if (isTv) {
+        val useQueRail = LocalAppTheme.current == AppTheme.RoyalBlue &&
+            LocalIsDarkTheme.current && !LocalTrueBlack.current
+        val defaultLiveTvView by settingsVm.defaultLiveTVView.collectAsStateWithLifecycle(initialValue = "")
+        val queDefaultLiveTvMode = if (defaultLiveTvView.equals("guide", ignoreCase = true)) {
+            LiveTVViewMode.Guide
+        } else LiveTVViewMode.List
+        val queLiveTvMode = rememberSaveable(queDefaultLiveTvMode) { mutableStateOf(queDefaultLiveTvMode) }
+        val quePageHasOwnHeader = useQueRail && selectedTab in
+            setOf(AppTab.Movies, AppTab.TVShows, AppTab.DVR, AppTab.Settings)
         // tvOS layout parity (Archie 2026-05-28 reference shot): when the
         // mini-player is active, the top chrome (centered nav tabs +
         // sync pill on the left + group filter pills below) does NOT
@@ -1007,9 +1019,15 @@ fun MainScaffold(
         // SELECTED pill directly, not the bar, so no entry heuristics apply).
         // + Search: not a pill, but the floating bar button needs a requester
         // for the same entry/exit focus redirects the pills use.
-        val pillRequesters = remember(tabs) {
+        val basePillRequesters = remember(tabs) {
             (tabs + AppTab.Search).associateWith { FocusRequester() }
         }
+        val guidePillRequester = remember { FocusRequester() }
+        val queRefreshRequester = remember { FocusRequester() }
+        // Existing page return contracts target whichever Live TV presentation is active.
+        val pillRequesters = if (useQueRail && queLiveTvMode.value == LiveTVViewMode.Guide) {
+            basePillRequesters + (AppTab.LiveTV to guidePillRequester)
+        } else basePillRequesters
         androidx.compose.runtime.SideEffect {
             focusPill.value = { tab -> runCatching { pillRequesters[tab]?.requestFocus() ?: false }.getOrDefault(false) }
         }
@@ -1040,6 +1058,7 @@ fun MainScaffold(
             LocalTvChromeCollapsed provides chromeCollapsed,
             LocalTvChromeScroll provides chromeScroll,
             LocalTvFullScreenOverlay provides fullScreenOverlay,
+            LocalLiveTvSessionMode provides if (useQueRail) queLiveTvMode else null,
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
             // TV chrome is an OVERLAY, not a sibling above the content
@@ -1059,10 +1078,12 @@ fun MainScaffold(
             // 62dp is the bar's designed height (16 top + 34 capsule + 12
             // bottom); it only ever seeds the very first frame, after which
             // the measured height governs.
-            val barInset = if (barHeightPx > 0) {
+            val barInset = if (quePageHasOwnHeader) {
+                0.dp
+            } else if (barHeightPx > 0) {
                 with(chromeDensity) { barHeightPx.toDp() }
             } else {
-                62.dp
+                if (useQueRail) 52.dp else 62.dp
             }
             // The corner mini player is mounted at the ACTIVITY root, outside
             // this composition, so it cannot read a CompositionLocal from
@@ -1070,14 +1091,16 @@ fun MainScaffold(
             // window state instead; PersistentExoWindow takes its top inset
             // from it (tvOS pins the mini 87pt from the physical screen top,
             // deliberately clear of the tab bar: mini report D1).
-            val barDrawnBottom = if (barDrawnBottomPx > 0f) {
+            val barDrawnBottom = if (quePageHasOwnHeader) {
+                0.dp
+            } else if (barDrawnBottomPx > 0f) {
                 with(chromeDensity) { barDrawnBottomPx.toDp() }
             } else {
                 barInset - 12.dp
             }
             androidx.compose.runtime.LaunchedEffect(barDrawnBottom) {
                 com.aeriotv.android.feature.player.MiniPlayerChrome
-                    .topInsetDp.value = barDrawnBottom.value + 4f
+                    .topInsetDp.value = if (quePageHasOwnHeader) 56f else barDrawnBottom.value + 4f
             }
             // Stash the corner mini at the trailing edge while Settings is
             // the selected tab; cleared when the scaffold leaves composition
@@ -1098,9 +1121,13 @@ fun MainScaffold(
             // pill, which flips barHasFocus and brings the bar back so the
             // user can see what they're navigating.
             var barHasFocus by remember { mutableStateOf(false) }
+            var toolbarHasFocus by remember { mutableStateOf(false) }
+            androidx.compose.runtime.SideEffect {
+                topNavHasFocusState.value = barHasFocus || (toolbarHasFocus && !quePageHasOwnHeader)
+            }
             // Collapse slides up and fades over 250 ms; the bar comes back
             // INSTANTLY (tvOS shows it at once on the way up).
-            val barTarget = if (chromeCollapsed.value && !barHasFocus) 0f else 1f
+            val barTarget = if (!useQueRail && chromeCollapsed.value && !barHasFocus) 0f else 1f
             val barCollapse by animateFloatAsState(
                 targetValue = barTarget,
                 animationSpec = if (barTarget == 1f) androidx.compose.animation.core.snap() else tween(durationMillis = 250),
@@ -1134,11 +1161,11 @@ fun MainScaffold(
             //  - Live TV: a 16dp band under the bar holds the one-line strip.
             //  - Other tabs / fullscreen (Pending): none (no strip shown).
             val miniActive = miniPlayerState is MiniPlayerSession.State.Active
-            val showHintStrip = hintsEnabled &&
+            val showHintStrip = !useQueRail && hintsEnabled &&
                 selectedTab == AppTab.LiveTV &&
                 miniPlayerState !is MiniPlayerSession.State.Pending
             val topHintGap = when {
-                selectedTab == AppTab.LiveTV &&
+                !useQueRail && selectedTab == AppTab.LiveTV &&
                     miniPlayerState !is MiniPlayerSession.State.Pending ->
                     16.dp
                 else -> 0.dp
@@ -1146,7 +1173,7 @@ fun MainScaffold(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(com.aeriotv.android.ui.theme.appBackgroundBrush())
+                    .appBackground()
                     .onPreviewKeyEvent { ev ->
                         if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionUp) {
                             lastUpKeyMs[0] = android.os.SystemClock.uptimeMillis()
@@ -1161,14 +1188,23 @@ fun MainScaffold(
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .fillMaxWidth()
+                        .then(
+                            if (useQueRail) {
+                                Modifier.width(QueTvRailWidth).fillMaxHeight()
+                            } else {
+                                Modifier.fillMaxWidth()
+                                    .onSizeChanged { barHeightPx = it.height }
+                                    .graphicsLayer {
+                                        alpha = barFraction
+                                        translationY = -(1f - barFraction) * barHeightPx.toFloat()
+                                    }
+                            },
+                        )
                         .zIndex(1f)
-                        .onSizeChanged { barHeightPx = it.height }
-                        .graphicsLayer {
-                            alpha = barFraction
-                            translationY = -(1f - barFraction) * barHeightPx.toFloat()
-                        }
-                        .onFocusChanged { barHasFocus = it.hasFocus; topNavHasFocusState.value = it.hasFocus },
+                        .onFocusChanged {
+                            barHasFocus = it.hasFocus
+                            topNavHasFocusState.value = it.hasFocus || (toolbarHasFocus && !quePageHasOwnHeader)
+                        },
                 ) {
                     TvTopTabBar(
                         retainedCount = retainedList.size,
@@ -1188,7 +1224,44 @@ fun MainScaffold(
                         lastUpKeyMs = lastUpKeyMs,
                         pillRequesters = pillRequesters,
                         isTabWarm = { it in visitedTabs },
-                        onDrawnBottomChanged = { barDrawnBottomPx = it },
+                        onDrawnBottomChanged = { if (!useQueRail) barDrawnBottomPx = it },
+                        useQueRail = useQueRail,
+                        liveTvMode = queLiveTvMode.value,
+                        onLiveTvModeSelect = { queLiveTvMode.value = it; initialTabApplied = true },
+                        liveTvListFocusRequester = basePillRequesters[AppTab.LiveTV],
+                        guideFocusRequester = guidePillRequester,
+                        toolbarFocusRequester = when {
+                            quePageHasOwnHeader -> null
+                            selectedTab == AppTab.LiveTV && queLiveTvMode.value == LiveTVViewMode.Guide -> queRefreshRequester
+                            else -> basePillRequesters[AppTab.Search]
+                        },
+                    )
+                }
+                if (useQueRail && !quePageHasOwnHeader) {
+                    QueTvToolbar(
+                        selected = selectedTab,
+                        liveTvMode = queLiveTvMode.value,
+                        onSearch = { selectedTab = AppTab.Search; initialTabApplied = true },
+                        searchFocusRequester = pillRequesters[AppTab.Search],
+                        refreshFocusRequester = queRefreshRequester,
+                        railFocusRequester = (selectedTab.takeIf { it in tabs } ?: tabs.firstOrNull())
+                            ?.let { pillRequesters[it] },
+                        tabEntryFocus = tabEntryFocus,
+                        onRefresh = { viewModel.refreshPlaylist() },
+                        refreshing = anyBackgroundWork,
+                        retainedCount = retainedList.size,
+                        onRetainedClick = { showRetainedDialog = true },
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(start = QueTvRailWidth)
+                            .fillMaxWidth()
+                            .zIndex(1f)
+                            .onSizeChanged { barHeightPx = it.height }
+                            .onGloballyPositioned { barDrawnBottomPx = it.boundsInRoot().bottom }
+                            .onFocusChanged {
+                                toolbarHasFocus = it.hasFocus
+                                topNavHasFocusState.value = barHasFocus || it.hasFocus
+                            },
                     )
                 }
                 androidx.compose.runtime.CompositionLocalProvider(
@@ -1220,7 +1293,10 @@ fun MainScaffold(
                         // measured height plus the hint band. It never changes
                         // while the bar collapses, so no tab (guide, Settings,
                         // media pages) sees its viewport resize mid-scroll.
-                        .padding(top = barInset + topHintGap)
+                        .padding(
+                            start = if (useQueRail) QueTvRailWidth else 0.dp,
+                            top = barInset + topHintGap,
+                        )
                         // UP leaving the tab content must land on the SELECTED
                         // tab's pill. Geometric 2D search used to hit whichever
                         // pill sat above the focused column (On Demand over the
@@ -1228,14 +1304,20 @@ fun MainScaffold(
                         // switched tabs (user report). The bar's own onEnter
                         // does not intercept a direct child hit, so the
                         // redirect lives on the content group's exit instead.
-                        .focusGroup()
                         .focusProperties {
                             onExit = {
-                                if (requestedFocusDirection == androidx.compose.ui.focus.FocusDirection.Up) {
-                                    pillRequesters[selectedTab]?.requestFocus()
+                                if (requestedFocusDirection == androidx.compose.ui.focus.FocusDirection.Up ||
+                                    (useQueRail && requestedFocusDirection == androidx.compose.ui.focus.FocusDirection.Left)
+                                ) {
+                                    val target = if (useQueRail &&
+                                        requestedFocusDirection == androidx.compose.ui.focus.FocusDirection.Left
+                                    ) selectedTab.takeIf { it in tabs } ?: tabs.firstOrNull() else selectedTab
+                                    val moved = target?.let { pillRequesters[it]?.requestFocus() } == true
+                                    if (useQueRail && moved) cancelFocusChange()
                                 }
                             }
-                        },
+                        }
+                        .focusGroup(),
                 )
                 }
             }
@@ -1292,16 +1374,17 @@ fun MainScaffold(
                     // truncates with an ellipsis instead of shifting.
                     val screenW = androidx.compose.ui.platform.LocalConfiguration
                         .current.screenWidthDp.dp
+                    val contentW = screenW - if (useQueRail) QueTvRailWidth else 0.dp
                     val stripMaxWidth = if (miniActive) {
-                        (screenW - 450.dp).coerceAtLeast(160.dp)
+                        (contentW - 450.dp).coerceAtLeast(160.dp)
                     } else {
-                        (screenW - 48.dp).coerceAtLeast(160.dp)
+                        (contentW - 48.dp).coerceAtLeast(160.dp)
                     }
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopStart)
                             .fillMaxWidth()
-                            .padding(top = stripBandTop)
+                            .padding(start = if (useQueRail) QueTvRailWidth else 0.dp, top = stripBandTop)
                             .height(stripHeight),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -1311,6 +1394,8 @@ fun MainScaffold(
                                     map = hintMap,
                                     sidebarGroups = hintGroupSelector == "sidebar",
                                     miniActive = miniActive,
+                                    radioActive = com.aeriotv.android.feature.player.RadioMode.state
+                                        .collectAsStateWithLifecycle().value != null,
                                 ),
                             modifier = Modifier.widthIn(max = stripMaxWidth),
                         )
@@ -1594,11 +1679,18 @@ fun MainScaffold(
                 // Multiview, Kept Live, cast card at the bottom; no circle
                 // beside them (the tablet button lives on the pill row).
                 val showMvBg = mvBgState != null && !isTv
+                val radioOnDock = com.aeriotv.android.feature.player.RadioMode.state
+                    .collectAsStateWithLifecycle().value != null && !isTv && !casting
                 val fabRow = when {
                     !phoneFab -> 0
                     showKept -> 1
                     showMv -> 2
                     showMvBg -> 3
+                    // Radio Mode card row (Apple parity, Logan 2026-10-15):
+                    // the card narrows and the button sits at its trailing
+                    // edge, like Kept Live. The button hides while casting,
+                    // so the cast card never shares the row.
+                    radioOnDock -> 5
                     else -> 4
                 }
                 @Composable
@@ -1656,7 +1748,7 @@ fun MainScaffold(
                                 com.aeriotv.android.feature.multiview.MultiviewDockCard(
                                     tiles = mvBgState.tiles,
                                     tablet = tabletNav,
-                                    title = com.aeriotv.android.feature.multiview.MULTIVIEW_BACKGROUND_TITLE,
+                                    title = com.aeriotv.android.feature.multiview.multiviewBackgroundTitle(mvBgState.tiles.size),
                                     actionLabel = "Stop",
                                     onOpen = onLaunchMultiview,
                                     onPlay = {
@@ -1737,10 +1829,61 @@ fun MainScaffold(
                         Spacer(Modifier.height(if (tabletNav) 12.dp else 8.dp))
                     }
                 }
+                // Radio Mode (Android#127): the cast card's place and style.
+                val radio by com.aeriotv.android.feature.player.RadioMode.state
+                    .collectAsStateWithLifecycle()
+                @Composable
+                fun DockRadio() {
+                    if (radio != null && !isTv && !casting) {
+                        val radioRow = fabRow == 5 && tabletCardWidth == null
+                        var radioCardPx by remember { mutableStateOf(0) }
+                        val density = LocalDensity.current
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Row(if (radioRow) mvRowFrame else Modifier, verticalAlignment = Alignment.CenterVertically) {
+                        com.aeriotv.android.feature.player.RadioTransportCard(
+                            modifier = if (radioRow) Modifier.weight(1f).onSizeChanged { radioCardPx = it.height } else Modifier,
+                            inRow = radioRow,
+                            tabletWidth = tabletCardWidth,
+                            nowProgramme = { ch -> state.epgByChannel[ch.guideMatchKey]?.nowPlaying() },
+                            loadChannelStreams = { channelIntPk ->
+                                val m3uNames = viewModel.loadM3uAccountNames()
+                                viewModel.loadChannelStreams(channelIntPk).map { st ->
+                                    com.aeriotv.android.feature.player.StreamOption(
+                                        id = st.id,
+                                        name = st.name.orEmpty(),
+                                        resolution = st.resolution,
+                                        fps = st.sourceFps,
+                                        bitrateKbps = st.outputBitrateKbps,
+                                        videoCodec = st.videoCodec,
+                                        audioCodec = st.audioCodec,
+                                        sourceName = st.m3uAccount?.let { m3uNames[it] },
+                                    )
+                                }
+                            },
+                            loadCurrentStreamId = { uuid -> viewModel.loadCurrentStreamId(uuid) },
+                            switchChannelStream = { uuid, streamId ->
+                                viewModel.switchChannelStream(uuid, streamId).getOrThrow()
+                            },
+                            recheckSwitchStreamAllowed = { trigger -> viewModel.recheckSwitchStreamAllowed(trigger) },
+                            isDispatcharrAdmin = capsPlaylist?.canSwitchStream() ?: false,
+                        )
+                        if (radioRow) {
+                            Spacer(Modifier.width(12.dp))
+                            CompanionControlFab(
+                                onClick = { showCompanionPicker = true },
+                                diameter = if (radioCardPx > 0) with(density) { radioCardPx.toDp() }
+                                    else com.aeriotv.android.feature.livetv.RetainedCardHeight,
+                            )
+                        }
+                        }
+                        }
+                        Spacer(Modifier.height(if (tabletNav) 12.dp else if (radioRow) 10.dp else 8.dp))
+                    }
+                }
                 if (tabletNav) {
-                    DockMvStaging(); DockMvBg(); DockKept(); DockFabOnly(); DockCast()
+                    DockMvStaging(); DockMvBg(); DockKept(); DockFabOnly(); DockRadio(); DockCast()
                 } else {
-                    DockCast(); DockMvBg(); DockMvStaging(); DockKept(); DockFabOnly()
+                    DockRadio(); DockCast(); DockMvBg(); DockMvStaging(); DockKept(); DockFabOnly()
                 }
                 val miniState = miniPlayerState
                 // Phase 139 / audit #22: on TV the mini-player is a top-right
@@ -2330,6 +2473,13 @@ private fun TvTopTabBar(
      *  outer Box is 16 dp taller above and 12 dp below, so its measured height
      *  is not where the bar visually ends; the corner mini needs the real one. */
     onDrawnBottomChanged: (Float) -> Unit = {},
+    /** Que Blue keeps the same focus/selection lifecycle in a fixed left rail. */
+    useQueRail: Boolean = false,
+    liveTvMode: LiveTVViewMode = LiveTVViewMode.Guide,
+    onLiveTvModeSelect: (LiveTVViewMode) -> Unit = {},
+    liveTvListFocusRequester: FocusRequester? = null,
+    guideFocusRequester: FocusRequester? = null,
+    toolbarFocusRequester: FocusRequester? = null,
 ) {
     // Selection-follows-focus, but committed ONLY for focus moves BETWEEN pills
     // (real D-pad traversal of the bar), never for focus ENTERING the bar from
@@ -2446,6 +2596,37 @@ private fun TvTopTabBar(
         if (android.os.SystemClock.uptimeMillis() - pulledAt > 5_000L) return@LaunchedEffect
         runCatching { pillRequesters[selected]?.requestFocus() }
         com.aeriotv.android.ui.tv.TvFocusTrace.guide("cold-start pull follows landing tab=$selected")
+    }
+    if (useQueRail) {
+        QueTvRail(
+            tabs = tabs,
+            selected = selected,
+            onSelect = onSelect,
+            focusRequester = focusRequester,
+            pillRequesters = pillRequesters,
+            tabEntryFocus = tabEntryFocus,
+            liveTvMode = liveTvMode,
+            liveTvListFocusRequester = liveTvListFocusRequester,
+            guideFocusRequester = guideFocusRequester,
+            toolbarFocusRequester = toolbarFocusRequester,
+            onLiveTvModeSelect = onLiveTvModeSelect,
+            onLiveTvModeFocused = { mode ->
+                if (armed || android.os.SystemClock.uptimeMillis() - lastUpKeyMs[0] < 400L) {
+                    onLiveTvModeSelect(mode)
+                }
+            },
+            onNavigationFocusChanged = { navHasFocus = it },
+            onTabFocused = { tab ->
+                com.aeriotv.android.ui.tv.TvFocusTrace.focus("tab:" + tab.name)
+                focusedTab = tab
+                if (tab != selected && isTabWarm(tab) &&
+                    (armed || android.os.SystemClock.uptimeMillis() - lastUpKeyMs[0] < 400L)
+                ) {
+                    onSelect(tab)
+                }
+            },
+        )
+        return
     }
     // Custom layout so the PILL CAPSULE is centered on the SCREEN (Logan
     // 2026-08-06: adding the circles to a shared centered row shoved the

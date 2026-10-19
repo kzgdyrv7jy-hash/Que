@@ -10,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.CropSquare
@@ -85,6 +86,8 @@ fun PlayerSettingsScreen(
     val playerPrefsScope = androidx.compose.runtime.rememberCoroutineScope()
     val skipWithoutControls by playerPrefs.skipWithoutControls.collectAsStateWithLifecycle(initialValue = false)
 
+    val radioModeByDefault by viewModel.radioModeByDefault
+        .collectAsStateWithLifecycle(initialValue = false)
     val showChannelInfoCard by viewModel.playerShowChannelInfoCard
         .collectAsStateWithLifecycle(initialValue = true)
     val cardChannelLogo by viewModel.playerCardShowChannelLogo
@@ -129,6 +132,9 @@ fun PlayerSettingsScreen(
 
     val startupRefreshRate by viewModel.startupRefreshRate.collectAsStateWithLifecycle(initialValue = "off")
     val matchContentResolution by viewModel.matchContentResolution.collectAsStateWithLifecycle(initialValue = false)
+    val matchFrameRate by viewModel.matchFrameRate.collectAsStateWithLifecycle(initialValue = false)
+    val multiviewPickerShowSubtitles by viewModel.multiviewPickerShowSubtitles.collectAsStateWithLifecycle(initialValue = false)
+    val multiviewPickerShowDescriptions by viewModel.multiviewPickerShowDescriptions.collectAsStateWithLifecycle(initialValue = false)
 
     SettingsSubPageHost {
     Column(modifier = Modifier.fillMaxSize()) {
@@ -213,6 +219,23 @@ fun PlayerSettingsScreen(
                         leadingIcon = if (isTv) Icons.Filled.FilterNone else null,
                         checked = showChannelInfoCard,
                         onCheckedChange = viewModel::setPlayerShowChannelInfoCard,
+                    )
+                }
+
+                // MARK: Radio Mode
+                //
+                // Radio Mode by Default (Discord request, Apple parity): every
+                // live channel pick opens Radio Mode; the long-press Watch
+                // still plays video. Default off.
+                SettingsSection(
+                    header = "Radio Mode",
+                    footer = RADIO_MODE_BY_DEFAULT_FOOTER,
+                ) {
+                    SettingsToggleRow(
+                        title = "Radio Mode by Default",
+                        leadingIcon = if (isTv) Icons.Filled.Radio else null,
+                        checked = radioModeByDefault,
+                        onCheckedChange = viewModel::setRadioModeByDefault,
                     )
                 }
 
@@ -504,6 +527,18 @@ fun PlayerSettingsScreen(
                         checked = multiviewShowLogos,
                         onCheckedChange = viewModel::setMultiviewShowLogos,
                     )
+                    SettingsToggleRow(
+                        title = "Show Subtitles",
+                        subtitle = "Show the program subtitle in the Add to Multiview picker",
+                        checked = multiviewPickerShowSubtitles,
+                        onCheckedChange = viewModel::setMultiviewPickerShowSubtitles,
+                    )
+                    SettingsToggleRow(
+                        title = "Show Descriptions",
+                        subtitle = "Show the program description in the Add to Multiview picker",
+                        checked = multiviewPickerShowDescriptions,
+                        onCheckedChange = viewModel::setMultiviewPickerShowDescriptions,
+                    )
                     if (multiviewShowLogos) {
                         val corners = listOf(
                             SettingsPickerOption("top_left", "Top Left"),
@@ -537,13 +572,19 @@ fun PlayerSettingsScreen(
                 if (isTv) {
                     SettingsSection(
                         header = "Display",
-                        footer = "Startup Refresh Rate switches the display once at app launch so it is already on your main content rate before the first channel (changes apply on next launch). Match Content Resolution outputs at the stream's resolution so your TV does the upscaling; the screen blinks briefly on each switch.",
+                        footer = "Startup Refresh Rate switches the display once at app launch so it is already on your main content rate before the first channel (changes apply on next launch). Match Frame Rate switches the refresh rate to the stream's frame rate and keeps the current resolution. Match Content Resolution outputs at the stream's resolution so your TV does the upscaling. The screen blinks briefly on each switch.",
                     ) {
                         SettingsToggleRow(
                             title = "Match Content Resolution",
                             subtitle = "Output 1080p streams at 1080p and let the TV upscale. Off keeps the display at its native mode.",
                             checked = matchContentResolution,
                             onCheckedChange = viewModel::setMatchContentResolution,
+                        )
+                        SettingsToggleRow(
+                            title = "Match Frame Rate",
+                            subtitle = "Switch to 50 Hz or 60 Hz to match the stream so motion stays smooth. The resolution is not changed.",
+                            checked = matchFrameRate,
+                            onCheckedChange = viewModel::setMatchFrameRate,
                         )
                         val rates = listOf(
                             SettingsPickerOption("off", "Off (System Default)"),
@@ -684,3 +725,6 @@ private const val LIVE_REWIND_FOOTER =
 interface PlayerSettingsEntryPoint {
     fun appPreferences(): com.aeriotv.android.core.preferences.AppPreferences
 }
+
+private const val RADIO_MODE_BY_DEFAULT_FOOTER =
+    "Every channel opens in Radio Mode. Long-press a channel and choose Watch to play video."

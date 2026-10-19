@@ -1,6 +1,11 @@
 package com.aeriotv.android.ui.tv
 
 import com.aeriotv.android.ui.theme.textAccent
+import com.aeriotv.android.ui.theme.RoyalBlueFocus
+import com.aeriotv.android.ui.theme.RoyalBlueRaised
+import com.aeriotv.android.ui.theme.ensureTextContrast
+import com.aeriotv.android.ui.theme.isQueTheme
+import com.aeriotv.android.ui.theme.readableOn
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.EaseInOut
@@ -38,6 +43,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -157,7 +163,7 @@ fun TvFilterPage(
     }
 }
 
-/** tvOS NativeSheetRowStyle: translucent capsule at rest, white when focused. */
+/** Focused capsules use legible ink on their actual fill in every theme. */
 @Composable
 private fun FilterRow(
     title: String,
@@ -170,6 +176,15 @@ private fun FilterRow(
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
     val pressed by interactionSource.collectIsPressedAsState()
+    val queTheme = isQueTheme()
+    val fill = when {
+        focused && queTheme -> RoyalBlueFocus
+        focused -> Color.White
+        queTheme && on && !accent -> RoyalBlueRaised
+        else -> colors.onSurface.copy(alpha = 0.10f).compositeOver(colors.surface)
+    }
+    val ink = if (focused && !queTheme) readableOn(fill)
+    else ensureTextContrast(if (queTheme) colors.onSurface else colors.textAccent, fill)
     val scale by animateFloatAsState(
         targetValue = if (focused) 1.03f else 1f,
         animationSpec = tween(durationMillis = 150, easing = EaseInOut),
@@ -182,7 +197,8 @@ private fun FilterRow(
             .scale(scale)
             .alpha(if (pressed) 0.8f else 1f)
             .clip(CircleShape)
-            .background(if (focused) Color.White else Color.White.copy(alpha = 0.10f))
+            .background(fill)
+            .border(2.dp, if (focused && queTheme) Color.White else Color.Transparent, CircleShape)
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
             .padding(horizontal = 11.dp),
         contentAlignment = Alignment.Center,
@@ -192,7 +208,7 @@ private fun FilterRow(
             fontSize = 13.sp,
             lineHeight = 16.sp,
             fontWeight = FontWeight.Medium,
-            color = colors.textAccent,
+            color = ink,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,

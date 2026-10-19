@@ -292,6 +292,23 @@ class AerioExoPlayerHolder @Inject constructor(
                 Log.i(ForceHls.TAG, "[FORCE-HLS] developer switch ${if (it) "ON" else "OFF"}")
             }
         }
+        // Server-side HLS output: hosts whose plain live URL answered with an
+        // HLS playlist are remembered per device so later tunes skip the TS try.
+        ForceHls.onServerHlsChanged = { hosts -> prefScope.launch { appPreferences.setServerHlsHosts(hosts) } }
+        prefScope.launch {
+            // Dev hook: `adb shell setprop debug.aerio.server_hls_reset 1` forgets
+            // the learned hosts at launch so the first-tune detection can be re-tested.
+            val reset = runCatching {
+                java.io.BufferedReader(java.io.InputStreamReader(
+                    Runtime.getRuntime().exec(arrayOf("getprop", "debug.aerio.server_hls_reset")).inputStream,
+                )).use { it.readLine()?.trim() }
+            }.getOrNull() == "1"
+            if (reset) {
+                Log.i(ForceHls.TAG, "[FORCE-HLS] server HLS hosts reset (debug.aerio.server_hls_reset)")
+                appPreferences.setServerHlsHosts(emptySet())
+            }
+            ForceHls.seedServerHlsHosts(if (reset) emptySet() else appPreferences.serverHlsHosts.first())
+        }
         // Learned live start buffer: the tracer reports the feed shape at every
         // stall, this decides whether the feed was bursty-but-real-time.
         tracer.onStall = { snapshot -> learnStartBuffer(snapshot) }
@@ -533,9 +550,312 @@ class AerioExoPlayerHolder @Inject constructor(
      *  tune path applies, or 0 when there is none. */
     private fun learnedHoldBackMs(): Int {
         val id = currentChannelIdForRebuild ?: currentChannelId ?: return 0
-        val entry = cachedLiveStartBuffers[id] ?: return 0
+        val audio = if (_audioOnly.value) audioOnlyHoldBackMs(id) else 0
+        val entry = cachedLiveStartBuffers[id] ?: return audio
+        val age = System.currentTimeMillis() - entry.learnedAtMs
+        return maxOf(audio, if (age > HOLDBACK_LEARNED_TTL_MS) 0 else entry.ms)
+    }
+
+    /** Learned audio-only hold-back of [channelId] (same 30 minute TTL), or 0. */
+    private fun audioOnlyHoldBackMs(channelId: String?): Int {
+        val entry = channelId?.let { cachedLiveStartBuffers[it + AUDIO_ONLY_HOLDBACK_KEY_SUFFIX] } ?: return 0
         val age = System.currentTimeMillis() - entry.learnedAtMs
         return if (age > HOLDBACK_LEARNED_TTL_MS) 0 else entry.ms
+    }
+
+    // ---- audio-only bursty feed (2026-10-15, Apple parity) ----
+    // Dispatcharr's proxy releases a low-bitrate audio-only stream in 256 KB
+    // chunks, so after the opening burst nothing arrives for 5 to 10 s at a
+    // time. The stall learner above raises the start buffer only after a stall
+    // and only for the next tune, so a radio channel chopped for a minute or
+    // more. For audio-only tunes only, the FIRST completed gap above 4 s sets
+    // the hold-back to gap + 2 s (cap 20 s) at once, persists it for the next
+    // tune's start gate, and rejoins at it now through the repeat-stall rejoin
+    // path without its 60 s / 3 minute gating. Video tunes are untouched.
+    //
+    // In-session growth (2026-10-15, Apple bd635ff, Alt Nation): the
+    // provider's bursts grew from 9 s to 19 to 29 s after the first raise and
+    // the session kept its first hold-back, so the buffer ran empty. Every
+    // later starved closure whose gap + 2 s (rounded up to whole seconds)
+    // passes the current audio-only hold-back raises it at once, persists it,
+    // and rejoins that far back through the local window (one rejoin seek per
+    // 15 s at most, none for a raise under 2 s). Cap 32 s.
+    private var audioOnlyBurstHandled = false
+    private var audioOnlyBurstSinceMs = 0L
+    private var audioOnlyHandledGapEndMs = 0L
+    private var audioOnlyHoldBackNowMs = 0
+    private var audioOnlyRaiseCount = 0
+    private var audioOnlyLastRejoinSeekAtMs = 0L
+    private var audioOnlyPendingRejoinMs = 0
+    private var audioOnlyCapLogged = false
+    private var audioOnlyRejoinDeferredLogged = false
+    private var audioOnlySpacingLogged = false
+    private var audioOnlyInRejoinWindow = false
+    private var audioOnlyBlockedLogged = false
+
+    private fun tickAudioOnlyBurst(now: Long) {
+        if (!_audioOnly.value) return
+        val url = lastPlayUrl ?: return
+        // A rejoin of our own into the local window keeps the live feed
+        // measured; any other timeshift (user rewind) is out.
+        if (ForceHls.isForcedHlsUrl(url)) {
+            tickAudioOnlyBurstHls(url, now)
+            return
+        }
+        val blocked = when {
+            PlaybackTracer.urlKind(url) != "live" -> "kind=${PlaybackTracer.urlKind(url)}"
+            isTimeshifting && !audioOnlyInRejoinWindow -> "timeshifting"
+            isCatchup -> "catch-up"
+            !hasReachedPlaybackRestart -> "not restarted"
+            inSwitchWindow() -> "switch window"
+            switchWatchJob?.isActive == true -> "switch watch"
+            currentChannelIdForRebuild == null -> "no channel id"
+            else -> null
+        }
+        if (blocked != null) {
+            if (!audioOnlyBlockedLogged && tracer.completedGapSinceMs(0L) > AUDIO_ONLY_BURST_MIN_GAP_MS) {
+                audioOnlyBlockedLogged = true
+                Log.i(TAG, "[AVP-HOLDBACK] audio-only bursty rule idle: $blocked")
+            }
+            return
+        }
+        val channelId = currentChannelIdForRebuild ?: return
+        // Only gaps that end after audio playback began: the opening burst
+        // and the time to first byte are not the feed's shape.
+        if (audioOnlyBurstSinceMs == 0L) {
+            audioOnlyBurstSinceMs = now
+            audioOnlyHandledGapEndMs = now
+            return
+        }
+        if (!audioOnlyBurstHandled) {
+            val gapMs = tracer.completedGapSinceMs(audioOnlyBurstSinceMs)
+            if (gapMs <= AUDIO_ONLY_BURST_MIN_GAP_MS) return
+            audioOnlyBurstHandled = true
+            audioOnlyHandledGapEndMs = tracer.completedGapsSince(audioOnlyBurstSinceMs)
+                .lastOrNull()?.first ?: now
+            val prior = audioOnlyHoldBackMs(channelId)
+            val wanted = audioOnlyWantedMs(gapMs)
+            val want = wanted.coerceAtMost(AUDIO_ONLY_HOLDBACK_MAX_MS)
+            val target = maxOf(prior, want)
+            audioOnlyHoldBackNowMs = target
+            Log.i(
+                TAG,
+                "[AVP-HOLDBACK] audio-only bursty feed: gap ${"%.1f".format(gapMs / 1000.0)}s -> " +
+                    "hold-back ${"%.1f".format(target / 1000.0)}s now (and for the next tune) " +
+                    "channel=${lastPlayTitle ?: "-"}",
+            )
+            logAudioOnlyCapIfNeeded(gapMs, wanted)
+            if (want <= prior + 500) return
+            persistAudioOnlyHoldBack(channelId, target)
+            // Rejoin at it now: the local window when it holds it, else a re-tune
+            // whose start gate is the new hold-back.
+            if (resumeGateEligible() && tryRejoin(now)) {
+                audioOnlyLastRejoinSeekAtMs = now
+                if (isTimeshifting) audioOnlyInRejoinWindow = true
+            }
+            return
+        }
+        // Each starved closure after the first is handled once.
+        val fresh = tracer.completedGapsSince(audioOnlyHandledGapEndMs)
+        if (fresh.isNotEmpty()) {
+            audioOnlyHandledGapEndMs = fresh.last().first
+            val gapMs = fresh.maxOf { it.second }
+            if (gapMs > AUDIO_ONLY_BURST_MIN_GAP_MS) {
+                val wanted = audioOnlyWantedMs(gapMs)
+                val want = wanted.coerceAtMost(AUDIO_ONLY_HOLDBACK_MAX_MS)
+                val was = maxOf(audioOnlyHoldBackNowMs, audioOnlyHoldBackMs(channelId))
+                if (want > was) {
+                    audioOnlyRaiseCount += 1
+                    audioOnlyHoldBackNowMs = want
+                    persistAudioOnlyHoldBack(channelId, want)
+                    Log.i(
+                        TAG,
+                        "[AVP-HOLDBACK] audio-only bursty feed: gap ${"%.1f".format(gapMs / 1000.0)}s -> " +
+                            "hold-back ${want / 1000}s now (was ${"%.0f".format(was / 1000.0)}s, " +
+                            "in-session raise #$audioOnlyRaiseCount) channel=${lastPlayTitle ?: "-"}",
+                    )
+                    if (want - was >= AUDIO_ONLY_MIN_RESEEK_RAISE_MS) {
+                        audioOnlyPendingRejoinMs = maxOf(audioOnlyPendingRejoinMs, want)
+                        audioOnlyRejoinDeferredLogged = false
+                        audioOnlySpacingLogged = false
+                    } else {
+                        if (audioOnlyPendingRejoinMs > 0) {
+                            audioOnlyPendingRejoinMs = maxOf(audioOnlyPendingRejoinMs, want)
+                        }
+                        Log.i(
+                            TAG,
+                            "[AVP-NUDGE] audio-only raise ${was / 1000}s -> ${want / 1000}s under " +
+                                "${AUDIO_ONLY_MIN_RESEEK_RAISE_MS / 1000} s, no rejoin seek",
+                        )
+                    }
+                }
+                logAudioOnlyCapIfNeeded(gapMs, wanted)
+            }
+        }
+        retryAudioOnlyRejoin(now)
+    }
+
+    /**
+     * Developer Force HLS twin of the rule above (2026-10-15): Media3 plays
+     * Dispatcharr's HLS at [forceHlsTargetOffsetMs] behind the edge, so that
+     * offset IS the hold-back. Every starved closure whose gap + 2 s (whole
+     * seconds) passes it raises it at once (cap 32 s), persists it under the
+     * HLS offset key (same TTL), and seeks that far behind the playlist edge
+     * when the live window holds it (one seek per 15 s, none under 2 s). The
+     * cushion keeper then holds the new target.
+     */
+    private fun tickAudioOnlyBurstHls(url: String, now: Long) {
+        val p = player ?: return
+        if (isTimeshifting || isCatchup || !hasReachedPlaybackRestart) return
+        if (PlaybackTracer.urlKind(url) != "live") return
+        val channelId = currentChannelIdForRebuild ?: return
+        if (audioOnlyBurstSinceMs == 0L) {
+            audioOnlyBurstSinceMs = now
+            audioOnlyHandledGapEndMs = now
+            audioOnlyHoldBackNowMs = forceHlsTargetOffsetMs
+            return
+        }
+        val fresh = tracer.completedGapsSince(audioOnlyHandledGapEndMs)
+        if (fresh.isNotEmpty()) {
+            audioOnlyHandledGapEndMs = fresh.last().first
+            val gapMs = fresh.maxOf { it.second }
+            if (gapMs > AUDIO_ONLY_BURST_MIN_GAP_MS) {
+                val wanted = audioOnlyWantedMs(gapMs)
+                val want = wanted.coerceAtMost(AUDIO_ONLY_HOLDBACK_MAX_MS)
+                val was = maxOf(audioOnlyHoldBackNowMs, forceHlsTargetOffsetMs)
+                if (want > was) {
+                    audioOnlyRaiseCount += 1
+                    audioOnlyHoldBackNowMs = want
+                    forceHlsTargetOffsetMs = want
+                    val key = channelId + FORCE_HLS_OFFSET_KEY_SUFFIX
+                    val at = System.currentTimeMillis()
+                    cachedLiveStartBuffers = cachedLiveStartBuffers +
+                        (key to com.aeriotv.android.core.preferences.LearnedStartBuffer(want, at))
+                    prefScope.launch {
+                        cachedLiveStartBuffers = appPreferences.setLiveStartBufferMs(key, want, at)
+                    }
+                    Log.i(
+                        TAG,
+                        "[AVP-HOLDBACK] audio-only bursty feed: gap ${"%.1f".format(gapMs / 1000.0)}s -> " +
+                            "hold-back ${want / 1000}s now (was ${"%.0f".format(was / 1000.0)}s, " +
+                            "in-session raise #$audioOnlyRaiseCount) channel=${lastPlayTitle ?: "-"}",
+                    )
+                    if (want - was >= AUDIO_ONLY_MIN_RESEEK_RAISE_MS) {
+                        audioOnlyPendingRejoinMs = maxOf(audioOnlyPendingRejoinMs, want)
+                        audioOnlyRejoinDeferredLogged = false
+                        audioOnlySpacingLogged = false
+                    } else {
+                        if (audioOnlyPendingRejoinMs > 0) audioOnlyPendingRejoinMs = maxOf(audioOnlyPendingRejoinMs, want)
+                        Log.i(TAG, "[AVP-NUDGE] audio-only raise ${was / 1000}s -> ${want / 1000}s under 2 s, no rejoin seek")
+                    }
+                }
+                logAudioOnlyCapIfNeeded(gapMs, wanted)
+            }
+        }
+        val holdback = audioOnlyPendingRejoinMs
+        if (holdback <= 0 || !p.playWhenReady) return
+        val tl = p.currentTimeline
+        if (tl.isEmpty) return
+        val w = tl.getWindow(p.currentMediaItemIndex, androidx.media3.common.Timeline.Window())
+        if (!w.isLive() || w.durationMs == androidx.media3.common.C.TIME_UNSET) return
+        if (w.durationMs < holdback + REJOIN_WINDOW_MARGIN_MS) {
+            if (!audioOnlyRejoinDeferredLogged) {
+                audioOnlyRejoinDeferredLogged = true
+                Log.i(TAG, "[AVP-NUDGE] audio-only rejoin to ${holdback / 1000} s deferred: live window ${w.durationMs} ms does not hold it yet")
+            }
+            return
+        }
+        if (audioOnlyLastRejoinSeekAtMs != 0L && now - audioOnlyLastRejoinSeekAtMs < AUDIO_ONLY_REJOIN_SPACING_MS) {
+            if (!audioOnlySpacingLogged) {
+                audioOnlySpacingLogged = true
+                Log.i(TAG, "[AVP-NUDGE] audio-only rejoin to ${holdback / 1000} s held: last rejoin seek ${now - audioOnlyLastRejoinSeekAtMs} ms ago (min 15 s)")
+            }
+            return
+        }
+        val have = (w.durationMs - p.currentPosition).coerceAtLeast(0L)
+        audioOnlyPendingRejoinMs = 0
+        if (have >= holdback - 500) return
+        audioOnlyLastRejoinSeekAtMs = now
+        Log.i(TAG, "[HOLDBACK] rejoin: seeking to edge-$holdback ms (audio-only in-session raise, was $have ms, window ${w.durationMs} ms)")
+        p.seekTo(p.currentMediaItemIndex, w.durationMs - holdback)
+    }
+
+    /** gap + 2 s, rounded up to whole seconds (uncapped). */
+    private fun audioOnlyWantedMs(gapMs: Long): Int {
+        val ms = gapMs + AUDIO_ONLY_HOLDBACK_HEADROOM_MS
+        return (((ms + 999) / 1000) * 1000).toInt()
+    }
+
+    private fun persistAudioOnlyHoldBack(channelId: String, ms: Int) {
+        val learnedAtMs = System.currentTimeMillis()
+        val key = channelId + AUDIO_ONLY_HOLDBACK_KEY_SUFFIX
+        cachedLiveStartBuffers = cachedLiveStartBuffers +
+            (key to com.aeriotv.android.core.preferences.LearnedStartBuffer(ms, learnedAtMs))
+        prefScope.launch {
+            cachedLiveStartBuffers = appPreferences.setLiveStartBufferMs(key, ms, learnedAtMs)
+        }
+    }
+
+    /** One line per tune when the audio-only ceiling holds the hold-back below gap + 2 s. */
+    private fun logAudioOnlyCapIfNeeded(gapMs: Long, wantedMs: Int) {
+        if (wantedMs <= AUDIO_ONLY_HOLDBACK_MAX_MS || audioOnlyCapLogged) return
+        audioOnlyCapLogged = true
+        Log.i(
+            TAG,
+            "[AVP-HOLDBACK] audio-only hold-back capped at ${AUDIO_ONLY_HOLDBACK_MAX_MS / 1000}s: " +
+                "gap ${"%.1f".format(gapMs / 1000.0)}s wanted ${wantedMs / 1000}s channel=${lastPlayTitle ?: "-"}",
+        )
+    }
+
+    /** Seeks [audioOnlyPendingRejoinMs] behind the local window's head once the
+     *  window holds that much and 15 s passed since the last audio-only rejoin
+     *  seek; otherwise keeps it pending for the next tick. */
+    private fun retryAudioOnlyRejoin(now: Long) {
+        val holdback = audioOnlyPendingRejoinMs
+        if (holdback <= 0) return
+        if (isCatchup || (isTimeshifting && !audioOnlyInRejoinWindow)) return
+        if (player?.playWhenReady != true && !resumeGateActive) return
+        val window = rewindWindow()
+        val headWallMs = window?.get(1) ?: 0L
+        val windowMs = if (window == null) 0L else (window[1] - window[0]).coerceAtLeast(0L)
+        val usable = windowMs - REJOIN_WINDOW_MARGIN_MS
+        if (window == null || headWallMs <= 0L || usable < holdback) {
+            if (!audioOnlyRejoinDeferredLogged) {
+                audioOnlyRejoinDeferredLogged = true
+                Log.i(
+                    TAG,
+                    "[AVP-NUDGE] audio-only rejoin to ${holdback / 1000} s deferred: local window " +
+                        "$windowMs ms does not hold it yet",
+                )
+            }
+            return
+        }
+        if (audioOnlyLastRejoinSeekAtMs != 0L && now - audioOnlyLastRejoinSeekAtMs < AUDIO_ONLY_REJOIN_SPACING_MS) {
+            if (!audioOnlySpacingLogged) {
+                audioOnlySpacingLogged = true
+                Log.i(
+                    TAG,
+                    "[AVP-NUDGE] audio-only rejoin to ${holdback / 1000} s held: last rejoin seek " +
+                        "${now - audioOnlyLastRejoinSeekAtMs} ms ago (min ${AUDIO_ONLY_REJOIN_SPACING_MS / 1000} s)",
+                )
+            }
+            return
+        }
+        audioOnlyPendingRejoinMs = 0
+        audioOnlyLastRejoinSeekAtMs = now
+        releaseResumeGate("rejoin")
+        Log.i(
+            TAG,
+            "[HOLDBACK] rejoin: seeking back $holdback ms into the local window " +
+                "(audio-only in-session raise, window $windowMs ms)",
+        )
+        if (playTimeshift(headWallMs - holdback)) {
+            audioOnlyInRejoinWindow = true
+            lastRejoinAtMs = now
+            lastLiveUnderrunAtMs = 0L
+        } else {
+            Log.i(TAG, "[HOLDBACK] rejoin: local window entry failed")
+        }
     }
 
     /**
@@ -592,7 +912,9 @@ class AerioExoPlayerHolder @Inject constructor(
         val headWallMs = window?.get(1) ?: 0L
         val windowMs = if (window == null) 0L else (window[1] - window[0]).coerceAtLeast(0L)
         val usable = (windowMs - REJOIN_WINDOW_MARGIN_MS).coerceAtLeast(0L)
-        val back = minOf(want, usable, REJOIN_MAX_BACK_MS)
+        // Audio-only hold-back may reach 32 s (tickAudioOnlyBurst).
+        val maxBack = if (_audioOnly.value) AUDIO_ONLY_HOLDBACK_MAX_MS.toLong() else REJOIN_MAX_BACK_MS
+        val back = minOf(want, usable, maxBack)
         if (back >= REJOIN_MIN_BACK_MS && headWallMs > 0L) {
             // Never outside the window: back is already capped at the window
             // minus its 1 s margin, so the target is at or after the tail.
@@ -1219,6 +1541,25 @@ class AerioExoPlayerHolder @Inject constructor(
     /** The server's verbatim 503 reason for the current tune, published into the
      *  unavailable overlay instead of a guessed cause. */
     @Volatile private var serverReason: String? = null
+    /** Channel whose stream went Channel Unavailable, kept through the
+     *  retries (which clear [streamUnavailable] while they reconnect) until
+     *  it reaches READY. Keep Recent Channels Live never keeps it. */
+    var failedChannelId: String?
+        get() = _failedChannelId.value
+        set(v) { _failedChannelId.value = v }
+    private val _failedChannelId = MutableStateFlow<String?>(null)
+    /** Observable [failedChannelId]: Radio Mode's card, sheet, and
+     *  notification stay on Channel Unavailable until this clears. */
+    val failedChannel: StateFlow<String?> = _failedChannelId.asStateFlow()
+
+    /** Clears the failure once the stream is READY and playing again. */
+    private fun clearFailureOnRecovery(why: String) {
+        val id = _failedChannelId.value ?: return
+        if (_streamUnavailable.value) return
+        _failedChannelId.value = null
+        android.util.Log.i("AerioTV", "[RADIO] recovered $id ($why)")
+    }
+
     private val _streamUnavailable = MutableStateFlow(false)
     /** True when a freshly-tuned live stream produced no data even after a
      *  reconnect, so the player UI can show "Channel unavailable" instead of an
@@ -1248,6 +1589,13 @@ class AerioExoPlayerHolder @Inject constructor(
         val hasVideo = tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO }
         val hasAudio = tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO }
         val now = hasAudio && !hasVideo
+        val key = currentChannelIdForRebuild ?: currentChannelId
+        if (hasVideo) AudioOnlyChannelMemory.forget(key, "video track on this tune")
+        // A Radio Mode cut is no evidence about the channel; only a normal
+        // tune that ended audio-only teaches the memory.
+        // A declared radio channel is no evidence either: the server's flag
+        // already decides its start, so it never writes the memory.
+        if (now && !radioVideoOff && !DeclaredRadioChannels.isFlagged(key)) AudioOnlyChannelMemory.remember(key)
         if (now == _audioOnly.value) return
         _audioOnly.value = now
         if (now) {
@@ -1269,6 +1617,7 @@ class AerioExoPlayerHolder @Inject constructor(
                 "(+${SystemClock.elapsedRealtime() - streamPrimedAtMs}ms)",
         )
         tracer.onFirstFrame()
+        maybeLogPressToAudio()
     }
     private val _lastErrorText = MutableStateFlow<String?>(null)
     /** Task #150: the most recent playback failure in user-showable form
@@ -1513,7 +1862,10 @@ class AerioExoPlayerHolder @Inject constructor(
         override fun onPlaybackStateChanged(playbackState: Int) {
             // Reaching READY means the failure (if any) is behind us, so a later
             // playWhenReady=false is a real user pause again.
-            if (playbackState == Player.STATE_READY) errorPending = false
+            if (playbackState == Player.STATE_READY) {
+                errorPending = false
+                if (player?.playWhenReady == true) clearFailureOnRecovery("READY")
+            }
             if (playbackState == Player.STATE_READY && player?.isPlaying == true) armWatchdog()
             // Buffer-underrun rebuffer on a live stream that was already
             // playing: hold the resume until the cushion is deep enough to
@@ -1524,7 +1876,11 @@ class AerioExoPlayerHolder @Inject constructor(
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (isPlaying && player?.playbackState == Player.STATE_READY) armWatchdog()
-            if (isPlaying) maybeAudioOnlyFirstFrame()
+            if (isPlaying) clearFailureOnRecovery("playing")
+            if (isPlaying) {
+                maybeAudioOnlyFirstFrame()
+                maybeLogPressToAudio()
+            }
         }
 
         override fun onTracksChanged(tracks: Tracks) = onTracksForAudioOnly(tracks)
@@ -1634,6 +1990,29 @@ class AerioExoPlayerHolder @Inject constructor(
             }
             // Dispatcharr connection limit (exact server signal, Direct Connect
             // only): show the notice and stop. No reload ladder, no walk.
+            // Dispatcharr proxy output set to HLS: the plain live URL redirected
+            // to a session playlist. The host is now learned, so a fresh tune
+            // of the entry URL goes through apply() + the HLS session resolve.
+            ForceHls.findServerHlsRedirect(error)?.let { redirect ->
+                Log.i(ForceHls.TAG, "[FORCE-HLS] live URL answered with an HLS playlist; re-tuning through the HLS session path")
+                tracer.recover("server HLS adoption")
+                consecutiveReloads = 0
+                lastForcedReloadAtMs = 0L
+                errorPending = false
+                // Adopt the session the redirected open already minted (token
+                // captured by the network interceptor) instead of ending it and
+                // resolving again: a resolve right after the DELETE answered
+                // 500/503 while the server tore the channel down (2026-10-14).
+                val token = ForceHls.tokenFor(redirect.playlistUrl)
+                setForceHlsSession(ForceHls.Session(redirect.playlistUrl, token))
+                forceHlsTuneAtMs = SystemClock.elapsedRealtime()
+                Log.i(ForceHls.TAG, "[FORCE-HLS] adopted the redirect's session token=${token?.take(8) ?: "none"}; playing token playlist")
+                playUrl(
+                    redirect.playlistUrl, lastPlayTitle, lastPlaySubtitle, lastPlayArtworkUri,
+                    lastPlayDrmType, lastPlayDrmKey, null,
+                )
+                return
+            }
             if (handleConnectionLimit(error)) return
             // Android companion to the frame-stall path: a terminal source/HTTP
             // error. Re-prime under the same cooldown + reload cap. If a LAN/WAN
@@ -1864,6 +2243,16 @@ class AerioExoPlayerHolder @Inject constructor(
     @Volatile private var forceHlsTuneAtMs = 0L
     /** The resolved server session behind the playing token playlist. */
     @Volatile private var forceHlsSession: ForceHls.Session? = null
+
+    /** Replaces the active server session, ending the previous one (channel change). */
+    private fun setForceHlsSession(next: ForceHls.Session) {
+        val prev = forceHlsSession
+        forceHlsSession = next
+        if (prev != null && prev.playlistUrl != next.playlistUrl) {
+            val hdrs = httpHeaders
+            prefScope.launch { ForceHls.endSession(prev, forceHlsRequestHeaders(hdrs)) }
+        }
+    }
     /** Entry URL whose redirect could not be resolved; played directly once. */
     private var forceHlsResolveSkipUrl: String? = null
     private var forceHlsResolveGeneration = 0
@@ -1932,13 +2321,14 @@ class AerioExoPlayerHolder @Inject constructor(
         context: Context,
     ): ExoPlayer {
         appContext = context.applicationContext
+        AudioOnlyChannelMemory.init(context)
         val audioPassthrough = cachedAudioPassthrough || audioSinkFallback
         // Buffer floor comes from the pref-cache updated by the collector in init{}.
         val bufferFloorMs = cachedBufferFloorMs
         // Learned live start gate for THIS tune, stamped by playUrl. Clamped so a
         // corrupt stored value can never push the start gate past the ceiling.
         val startGateMs = gateKeyFor(
-            desiredStartGateMs.coerceIn(LIVE_START_GATE_DEFAULT_MS, LIVE_START_GATE_MAX_MS),
+            desiredStartGateMs.coerceIn(LIVE_START_GATE_DEFAULT_MS, AUDIO_ONLY_HOLDBACK_MAX_MS),
             desiredForcedHls,
             forceHlsTargetOffsetMs,
         )
@@ -2168,7 +2558,7 @@ class AerioExoPlayerHolder @Inject constructor(
             httpDataSourceFactory(rawTs)
         if (rawTs) {
             dataSourceFactory = com.aeriotv.android.core.timeshift.TeeDataSource.Factory(
-                dataSourceFactory,
+                ServerHlsGuard.Factory(dataSourceFactory),
             ) { timeshift.get().activeWriter }
         }
         // Byte-flow accounting for [TUNE] firstByte and the [FEED] lines. The
@@ -2350,7 +2740,131 @@ class AerioExoPlayerHolder @Inject constructor(
      *  roll, so the backup provider's unrelated PTS used to leave audio and
      *  queued video on different timelines (video held as "too early", or a
      *  31 min jump, plus the AudioSink discontinuity error). */
-    private fun tsOnlyExtractorsFactory(): ExtractorsFactory = ExtractorsFactory {
+    private fun tsOnlyExtractorsFactory(): ExtractorsFactory {
+        // Read ONCE per media source, on the main thread, before the prime:
+        // Radio Mode and the per-channel audio-only memory decide how fast a
+        // video-declaring PMT may be called audio-only (AudioOnlyGraceRule).
+        val key = currentChannelIdForRebuild ?: currentChannelId
+        val policy = audioOnlyPolicyFor(key)
+        val gen = primeGeneration
+        radioCutVideo = false
+        if (policy != AudioOnlyStartPolicy.UNKNOWN) {
+            Log.i(TAG, "[AUDIO-ONLY] start policy ${policy.logName} ch=$key")
+        }
+        return tsOnlyExtractorsFactory(policy, key, gen)
+    }
+
+    /**
+     * Fast audio-only start, exact conditions (GH AerioTV#90, SiriusXM
+     * channels up to 15 s to start; Logan 2026-10-14):
+     * - REQUESTED: Radio Mode is on for this tune ([radioVideoOff]: a Radio
+     *   Mode start from a menu, a pick while in Radio Mode, or Channel Up /
+     *   Down in Radio Mode). The guard drops the declared video track on the
+     *   first audio sample. Switch to Video Mode re-prepares
+     *   ([restoreVideoAfterRadio]).
+     * - REMEMBERED: an earlier tune of this channel id ended audio-only on a
+     *   normal (non-Radio) tune and no video was seen on it since
+     *   ([AudioOnlyChannelMemory], 7 day TTL). Zero bytes on the declared
+     *   video PID while 2 s of audio media time AND 1 s of wall time pass.
+     *   Any video byte clears the memory; video after the call restarts the
+     *   tune as a video program.
+     * - DECLARED: the server flags the channel radio (DeclaredRadioChannels:
+     *   Dispatcharr effective_is_radio, M3U radio="true", XC radio_streams)
+     *   on a normal tune (the Watch artwork player). Same drop as REQUESTED;
+     *   video after the call restarts the tune as video and the channel
+     *   falls back to the normal rule for this channel list.
+     * - UNKNOWN: everything else, including every regular video channel:
+     *   unchanged (4 s wall with a silent video PID, 12 s if it sent bytes).
+     */
+    private fun audioOnlyPolicyFor(key: String?): AudioOnlyStartPolicy = when {
+        radioVideoOff -> AudioOnlyStartPolicy.REQUESTED
+        DeclaredRadioChannels.isDeclared(key) -> AudioOnlyStartPolicy.DECLARED
+        AudioOnlyChannelMemory.isRemembered(key) -> AudioOnlyStartPolicy.REMEMBERED
+        else -> AudioOnlyStartPolicy.UNKNOWN
+    }
+
+    /** A Radio Mode tune dropped the declared video track on this prime:
+     *  Switch to Video Mode must re-prepare, a track toggle is not enough. */
+    @Volatile private var radioCutVideo = false
+
+    private fun onGuardDropped(policy: AudioOnlyStartPolicy, key: String?, gen: Long) {
+        mainHandler.post {
+            if (gen != primeGeneration) return@post
+            if (policy == AudioOnlyStartPolicy.REQUESTED) radioCutVideo = true
+            Log.i(TAG, "[TUNE] audio-only call +${tracer.msSincePress()}ms after press ch=$key policy=${policy.name}")
+        }
+    }
+
+    private fun onGuardVideoAfterDrop(policy: AudioOnlyStartPolicy, key: String?, gen: Long) {
+        AudioOnlyChannelMemory.forget(key, "video appeared after the audio-only call")
+        mainHandler.post {
+            if (gen != primeGeneration) return@post
+            when (policy) {
+                AudioOnlyStartPolicy.REQUESTED -> Log.i(
+                    TAG,
+                    "[AUDIO-ONLY] video bytes during a Radio Mode audio-only tune ch=$key; " +
+                        "Switch to Video Mode restarts as video",
+                )
+                AudioOnlyStartPolicy.REMEMBERED -> {
+                    Log.i(TAG, "[AUDIO-ONLY] video appeared after optimistic audio-only start; restarting as video ch=$key")
+                    reprimeSameUrl("video after optimistic audio-only start")
+                }
+                AudioOnlyStartPolicy.DECLARED -> {
+                    DeclaredRadioChannels.markVideoSeen(key)
+                    Log.i(TAG, "[AUDIO-ONLY] video appeared on a declared radio channel; restarting as video ch=$key")
+                    reprimeSameUrl("video on a declared radio channel")
+                }
+                AudioOnlyStartPolicy.UNKNOWN -> Unit
+            }
+        }
+    }
+
+    /**
+     * Switch to Video Mode (Radio Mode end with the player reopening). A
+     * Radio Mode tune that cut the declared video track re-prepares the same
+     * stream as a video program; otherwise the video track is re-enabled in
+     * place. [timeshiftWallMs] is the playhead when playing from the Live
+     * Rewind buffer (re-opened there instead of jumping to live).
+     */
+    fun restoreVideoAfterRadio(timeshiftWallMs: Long?) {
+        radioVideoOff = false
+        setVideoTrackEnabled(true)
+        if (!radioCutVideo) {
+            Log.i(TAG, "[RADIO] Switch to Video Mode: video track re-enabled in place ch=$currentChannelId")
+            return
+        }
+        radioCutVideo = false
+        if (isTimeshifting && timeshiftWallMs != null) {
+            Log.i(TAG, "[RADIO] Switch to Video Mode: video was cut for Radio Mode; re-preparing the buffer as video ch=$currentChannelId")
+            playTimeshift(timeshiftWallMs)
+        } else {
+            Log.i(TAG, "[RADIO] Switch to Video Mode: video was cut for Radio Mode; re-preparing as video ch=$currentChannelId")
+            reprimeSameUrl("Switch to Video Mode")
+        }
+    }
+
+    /** "[TUNE] press->audio" once per prime (an audio-only start, or any
+     *  Radio Mode start), so a user log shows where the time went. */
+    @Volatile private var pressToAudioLoggedGen = -1L
+
+    private fun maybeLogPressToAudio() {
+        val p = player ?: return
+        if (pressToAudioLoggedGen == primeGeneration) return
+        if (!_audioOnly.value && !radioVideoOff) return
+        if (!p.isPlaying || p.playbackState != Player.STATE_READY) return
+        pressToAudioLoggedGen = primeGeneration
+        Log.i(
+            TAG,
+            "[TUNE] press->audio ${tracer.msSincePress()} ms ch=$currentChannelId " +
+                "(audioOnly=${_audioOnly.value} radio=$radioVideoOff +${SystemClock.elapsedRealtime() - streamPrimedAtMs}ms after prime)",
+        )
+    }
+
+    private fun tsOnlyExtractorsFactory(
+        policy: AudioOnlyStartPolicy,
+        key: String?,
+        gen: Long,
+    ): ExtractorsFactory = ExtractorsFactory {
         val all: Array<Extractor> = DefaultExtractorsFactory()
             .setTsExtractorMode(TsExtractor.MODE_SINGLE_PMT)
             .createExtractors()
@@ -2363,7 +2877,18 @@ class AerioExoPlayerHolder @Inject constructor(
         // which never carries a picture must not hold preparation forever.
         // safeTsExtractor: same TsExtractor, but a corrupt AC-3 header resyncs
         // instead of failing the load (see SafeTsExtractor.kt).
-        val continuous: Extractor = ContinuousTsExtractor(AudioOnlyTrackGuard(safeTsExtractor()))
+        val guard = AudioOnlyTrackGuard(
+            safeTsExtractor(),
+            policy = policy,
+            onDropped = { pol, _ -> onGuardDropped(pol, key, gen) },
+            onVideoAfterDrop = { pol -> onGuardVideoAfterDrop(pol, key, gen) },
+            onVideoBytes = {
+                if (policy == AudioOnlyStartPolicy.REMEMBERED) {
+                    AudioOnlyChannelMemory.forget(key, "video bytes before the audio-only call")
+                }
+            },
+        )
+        val continuous: Extractor = ContinuousTsExtractor(guard)
         buildList {
             fmp4?.let { add(it) }
             add(object : Extractor by continuous {
@@ -2531,7 +3056,7 @@ class AerioExoPlayerHolder @Inject constructor(
         currentChannelId = channelId
         clearPauseStamp("adopted live")
         resetWatchdogStateForNewStream()
-        setVideoTrackEnabled(!remoteAudioOnly)
+        setVideoTrackEnabled(!radioVideoOff)
         liveFailover.disarm()
         tracer.markTuneStart(title, "live")
         primeGeneration += 1
@@ -2593,6 +3118,7 @@ class AerioExoPlayerHolder @Inject constructor(
         if (!isTimeshifting) return
         isTimeshifting = false
         isAdoptedLive = false
+        audioOnlyInRejoinWindow = false
         timeshift.get().onGoLive()
         val url = lastPlayUrl ?: return
         Log.i(TAG, "[REWIND] go live -> re-tune direct stream")
@@ -2679,7 +3205,7 @@ class AerioExoPlayerHolder @Inject constructor(
         lastCatchupSubtitle = subtitle
         lastCatchupArtworkUri = artworkUri
         resetWatchdogStateForNewStream()
-        setVideoTrackEnabled(!remoteAudioOnly)
+        setVideoTrackEnabled(!radioVideoOff)
         val mediaMetadata = MediaMetadata.Builder()
             .setTitle(title)
             .setArtist(subtitle)
@@ -2762,7 +3288,7 @@ class AerioExoPlayerHolder @Inject constructor(
                     if (gen != forceHlsResolveGeneration) return@withContext
                     val ms = SystemClock.elapsedRealtime() - t0
                     if (session != null) {
-                        forceHlsSession = session
+                        setForceHlsSession(session)
                         Log.i(ForceHls.TAG, "[FORCE-HLS] resolved in ${ms}ms; playing token playlist")
                         playUrl(session.playlistUrl, title, subtitle, artworkUri, drmLicenseType, drmLicenseKey, channelId)
                     } else {
@@ -2801,7 +3327,35 @@ class AerioExoPlayerHolder @Inject constructor(
         // target duration governs the start, not the TS burst shape.
         // Forced HLS starts on one Dispatcharr burst plus margin so the first
         // 5 to 6 s burst gap does not drain a 1.2 s start buffer.
+        // Audio-only hold-back (tickAudioOnlyBurst): stored under its own key,
+        // written only by audio-only tunes, so a video tune never reads it.
+        val audioOnlyLearnedMs =
+            if (kind == "live" && !forcedHls) audioOnlyHoldBackMs(effectiveChannelId) else 0
+        // A tune known to be audio-only before it starts (Radio Mode, a
+        // declared radio channel, or one remembered audio-only) never starts
+        // on less than 3 segments' worth of audio (6 s), Apple parity with
+        // the 3x targetDuration audio-only join (2026-10-15: 2x chopped from
+        // the first seconds on a clean AAC feed). Video tunes are unchanged.
+        val knownAudioOnly = kind == "live" && !forcedHls &&
+            audioOnlyPolicyFor(effectiveChannelId) != AudioOnlyStartPolicy.UNKNOWN
+        val audioOnlyGateMs = if (knownAudioOnly) maxOf(audioOnlyLearnedMs, AUDIO_ONLY_START_GATE_MIN_MS)
+        else audioOnlyLearnedMs
         val startGateMs = if (forcedHls) FORCE_HLS_START_GATE_MS
+        else if (audioOnlyGateMs > 0) {
+            if (audioOnlyLearnedMs > 0) {
+                restampLearnedOnUse(
+                    effectiveChannelId!! + AUDIO_ONLY_HOLDBACK_KEY_SUFFIX,
+                    cachedLiveStartBuffers.getValue(effectiveChannelId + AUDIO_ONLY_HOLDBACK_KEY_SUFFIX),
+                )
+            }
+            Log.i(
+                TAG,
+                "[HOLDBACK] ch=${title ?: "?"} audio-only start gate $audioOnlyGateMs ms " +
+                    "(learned $audioOnlyLearnedMs ms, floor $AUDIO_ONLY_START_GATE_MIN_MS ms when known audio-only)",
+            )
+            maxOf(LIVE_START_GATE_DEFAULT_MS, learnedGateMs.coerceAtMost(LIVE_START_GATE_MAX_MS), audioOnlyGateMs)
+                .coerceAtMost(AUDIO_ONLY_HOLDBACK_MAX_MS)
+        }
         else maxOf(LIVE_START_GATE_DEFAULT_MS, learnedGateMs)
             .coerceAtMost(LIVE_START_GATE_MAX_MS)
         if (forcedHls) {
@@ -2845,6 +3399,17 @@ class AerioExoPlayerHolder @Inject constructor(
         // A fresh prime restarts the repeat-stall window; the rejoin cooldown
         // deliberately survives it, since a rejoin IS a re-prime.
         lastLiveUnderrunAtMs = 0L
+        audioOnlyBurstHandled = false
+        audioOnlyBurstSinceMs = 0L
+        audioOnlyHandledGapEndMs = 0L
+        audioOnlyHoldBackNowMs = 0
+        audioOnlyRaiseCount = 0
+        audioOnlyPendingRejoinMs = 0
+        audioOnlyCapLogged = false
+        audioOnlyRejoinDeferredLogged = false
+        audioOnlySpacingLogged = false
+        audioOnlyInRejoinWindow = false
+        audioOnlyBlockedLogged = false
         lastPlayTitle = title
         lastPlaySubtitle = subtitle
         lastPlayArtworkUri = artworkUri
@@ -2874,7 +3439,7 @@ class AerioExoPlayerHolder @Inject constructor(
         // session previously dropped the video track on this shared player --
         // UNLESS a companion remote explicitly asked for Audio Only, which a
         // watchdog/poller re-prime must not undo.
-        setVideoTrackEnabled(!remoteAudioOnly)
+        setVideoTrackEnabled(!radioVideoOff)
         tracer.markTuneStart(title, kind)
         primeGeneration += 1
         resetForceHlsCushion("prime")
@@ -2948,6 +3513,13 @@ class AerioExoPlayerHolder @Inject constructor(
             httpHeaders.filterKeys { !it.equals("User-Agent", ignoreCase = true) },
         )
         if (nonUaHeaders.isNotEmpty()) factory.setDefaultRequestProperties(nonUaHeaders)
+        val authMode = when {
+            nonUaHeaders.keys.any { it.equals("X-API-Key", true) } -> "X-API-Key"
+            nonUaHeaders.entries.any { it.key.equals("Authorization", true) && it.value.startsWith("Bearer", true) } -> "Bearer"
+            else -> "none"
+        }
+        android.util.Log.i("AerioLiveSource", "live factory headers=[${nonUaHeaders.keys.sorted().joinToString(",")}] " +
+            "auth=$authMode uaCustom=${headerUa != null}")
         return factory
     }
 
@@ -3137,6 +3709,7 @@ class AerioExoPlayerHolder @Inject constructor(
             .readTimeout(liveReadTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
+            .addNetworkInterceptor(ForceHls.redirectTokenInterceptor)
             .build()
     }
 
@@ -3235,17 +3808,15 @@ class AerioExoPlayerHolder @Inject constructor(
     }
 
     /**
-     * Sticky Audio Only requested by a companion remote / cast sender
-     * (GH #33). [playUrl]'s unconditional video re-enable exists for the
-     * Android Auto case; without this flag any re-prime (follow-poller,
-     * stall watchdog, LAN/WAN flip) silently restored video seconds after
-     * a phone toggled Audio Only on (2026-07-17 Streamer test: state
-     * flipped On -> video back -> state self-healed to Off). Set/cleared
-     * only by the remote command paths; the foreground re-enables consult
-     * it.
+     * Radio Mode keeps the video track off (RadioMode sets and clears it).
+     * [playUrl]'s unconditional video re-enable exists for the Android Auto
+     * case; without this flag any re-prime (follow-poller, stall watchdog,
+     * LAN/WAN flip, a Radio channel switch) would bring video back while
+     * Radio Mode plays. The user-facing Audio Only mode it used to back was
+     * removed (Radio Mode replaces it, 2026-10-13).
      */
     @Volatile
-    var remoteAudioOnly = false
+    var radioVideoOff = false
 
     /** Full teardown for the X-close button. Releases the codec,
      *  audio renderer, and DataSource. Next acquire creates fresh. */
@@ -3417,6 +3988,7 @@ class AerioExoPlayerHolder @Inject constructor(
                 // holds, playWhenReady is false and the stale-position check
                 // deliberately skips the stream.
                 tickResumeGate(p, now)
+                tickAudioOnlyBurst(now)
                 tickForceHlsCushion(p, now)
 
                 // Cold-start NO-DATA net (never-started stream). Runs INDEPENDENT
@@ -4013,6 +4585,7 @@ class AerioExoPlayerHolder @Inject constructor(
                 ?: "No data received from the stream"
         }
         _streamUnavailable.value = true
+        failedChannelId = reconnectChannelId
         tracer.recover("stream unavailable; stopping")
         stop()
     }
@@ -4408,6 +4981,19 @@ class AerioExoPlayerHolder @Inject constructor(
         /** Ceiling on the learned hold-back: past 10 s the tap-to-motion cost
          *  outweighs riding out the gap. */
         private const val LIVE_START_GATE_MAX_MS = 10_000
+        /** Audio-only bursty feed rule (tickAudioOnlyBurst): first completed
+         *  gap above this sets the hold-back to gap + headroom, capped. */
+        private const val AUDIO_ONLY_BURST_MIN_GAP_MS = 4_000L
+        private const val AUDIO_ONLY_HOLDBACK_HEADROOM_MS = 2_000L
+        /** Raised from 20 s on 2026-10-15: Alt Nation's bursts grew to 19 to 29 s mid-session. */
+        private const val AUDIO_ONLY_HOLDBACK_MAX_MS = 32_000
+        /** At most one audio-only in-session rejoin seek per this interval. */
+        private const val AUDIO_ONLY_REJOIN_SPACING_MS = 15_000L
+        /** An in-session raise smaller than this is stored but does not seek. */
+        private const val AUDIO_ONLY_MIN_RESEEK_RAISE_MS = 2_000
+        /** Known audio-only tunes start on at least 3 x 2 s segments' worth. */
+        private const val AUDIO_ONLY_START_GATE_MIN_MS = 6_000
+        private const val AUDIO_ONLY_HOLDBACK_KEY_SUFFIX = "#audio_only_holdback"
         /** At or above this media-time ratio the feed is keeping up with real
          *  time, so a stall means the bytes arrived in bursts and the start
          *  cushion was too shallow. */
@@ -4422,7 +5008,7 @@ class AerioExoPlayerHolder @Inject constructor(
         const val FORCE_HLS_START_GATE_MS = 6_500
         private const val FORCE_HLS_TARGET_OFFSET_MS = ForceHls.DEFAULT_TARGET_OFFSET_MS
         private const val FORCE_HLS_MIN_OFFSET_MS = 8_000L
-        private const val FORCE_HLS_MAX_OFFSET_MS = 30_000L
+        private const val FORCE_HLS_MAX_OFFSET_MS = 34_000L // above the 32 s audio-only hold-back cap
         private const val FORCE_HLS_LEARNED_OFFSET_MAX_MS = 20_000
         private const val FORCE_HLS_OFFSET_KEY_SUFFIX = "#hls_live_offset"
         /** Cushion added on top of the worst observed delivery gap so the feed

@@ -143,6 +143,10 @@ private const val WATCH_FROM_START_WINDOW_MS = 45_000L
  * real recording and stays clear of overflow in Util.msToUs.
  */
 private const val WATCH_FROM_START_TARGET_OFFSET_MS = 30L * 24L * 60L * 60L * 1000L
+/** Apple #93 parity: seeks in an in-progress recording stay this far behind the written end. */
+private const val DVR_WRITTEN_END_GUARD_MS = 12_000L
+/** Apple #93 parity: at most this many /file/ to HLS fallbacks per session. */
+private const val DVR_MAX_HLS_RETURNS = 3
 
 /** Cap on re-corrections so a window that refuses to hold position 0 degrades
  *  to "starts at live" rather than an endless seek loop. */
@@ -505,6 +509,23 @@ fun VODPlayerScreen(
     var dvrActive by remember { mutableStateOf(PhoneVodMini.restoreDvrActive(streamUrl, isDvr)) }
     var dvrMigrated by remember { mutableStateOf(PhoneVodMini.restoreDvrMigrated(streamUrl)) }
     var dvrEndPromptVisible by remember { mutableStateOf(false) }
+    // Apple #93 parity: position a /file/ migration started from (-1 = none
+    // pending verification), how many times it fell back to HLS, and the
+    // "Reloading..." status shown while it does.
+    var dvrMigratedFromMs by remember { mutableStateOf(-1L) }
+    var dvrReturnsToHls by remember { mutableStateOf(0) }
+    var dvrStatusText by remember { mutableStateOf<String?>(null) }
+    val returnToInProgressHls: (androidx.media3.exoplayer.ExoPlayer, Long, String) -> Unit = { p, atMs, why ->
+        dvrReturnsToHls++
+        Log.i(TAG, "[DVR] file not finalized; back to in-progress HLS at ${atMs}ms ($why)")
+        dvrMigrated = false
+        dvrActive = true
+        dvrMigratedFromMs = -1L
+        dvrStatusText = "Reloading..."
+        p.setMediaItem(MediaItem.fromUri(streamUrl), atMs)
+        p.prepare()
+        p.playWhenReady = true
+    }
     var dvrEndPromptDismissed by remember { mutableStateOf(false) }
     // iOS PlayerView.scrubStep acceleration: consecutive same-direction
     // steps grow the multiplier (1 + count/2, capped 12x of the 10s base).
@@ -615,7 +636,7 @@ fun VODPlayerScreen(
         // sweep can't overrun the growing window and stall; plain VOD clamps
         // at the duration; unknown duration steps unclamped.
         val maxPos = if (durationMs > 0L) {
-            if (dvrActive) (durationMs - 5_000L).coerceAtLeast(0L) else durationMs
+            if (dvrActive) (durationMs - DVR_WRITTEN_END_GUARD_MS).coerceAtLeast(0L) else durationMs
         } else {
             Long.MAX_VALUE
         }
@@ -635,8 +656,25 @@ fun VODPlayerScreen(
         val player = exoPlayer ?: return@seek
         userSeeked = true
         if (!isCatchup) {
-            player.seekTo(rawTarget)
-            positionMs = rawTarget
+            var target = rawTarget
+            if (dvrActive) {
+                // Apple #93 parity: an in-progress recording's written end has
+                // nothing buffered past it; a seek there stalls. Hold 12 s back.
+                val writtenEnd = player.duration.takeIf { it > 0L }
+                Log.i(TAG, "[DVR] seek to ${rawTarget / 1000}s (written end ${writtenEnd?.div(1000) ?: "?"}s)")
+                if (writtenEnd != null) {
+                    val maxPos = (writtenEnd - DVR_WRITTEN_END_GUARD_MS).coerceAtLeast(0L)
+                    // >=: the scrub and skip paths already cap their target
+                    // at the same guard, so a capped request arrives equal.
+                    if (target >= maxPos) {
+                        Log.i(TAG, "[DVR] seek clamped ${target / 1000}s -> ${maxPos / 1000}s (written end ${writtenEnd / 1000}s)")
+                        target = maxPos
+                    }
+                }
+                target = target.coerceAtLeast(0L)
+            }
+            player.seekTo(target)
+            positionMs = target
             return@seek
         }
         val progLenMs = catchupEndMillis - catchupStartMillis
@@ -727,6 +765,44 @@ fun VODPlayerScreen(
         player.prepare()
         player.playWhenReady = true
         Log.i(TAG, "Catch-up re-tune to ${target / 1000}s (window ${windowOffset / 1000}s)")
+    }
+    // GH #135: hidden-chrome Left/Right outcome from VodHiddenChromeScrub
+    // (Custom map SEEK_* / PLAY_PAUSE, or Skip Without Controls).
+    val vodHiddenChromeAction: (Int, Boolean) -> Unit = { mode, isLeft ->
+        when (mode) {
+            VodHiddenChromeScrub.SKIP_BACK, VodHiddenChromeScrub.SKIP_FORWARD -> {
+                scrubTargetMs = null
+                scrubAccelCount = 0
+                scrubLastDirection = 0
+                val fwd = mode == VodHiddenChromeScrub.SKIP_FORWARD
+                val skipFromMs = positionMs
+                if (fwd) {
+                    seekPlayer(min(
+                        if (durationMs <= 0L) Long.MAX_VALUE
+                        else if (dvrActive) (durationMs - DVR_WRITTEN_END_GUARD_MS).coerceAtLeast(0L) else durationMs,
+                        positionMs + SkipIntervals.forwardMs,
+                    ))
+                } else {
+                    seekPlayer(max(0L, positionMs - SkipIntervals.backMs))
+                }
+                val mapped = if (isLeft) VodHiddenChromeScrub.customLeftShort else VodHiddenChromeScrub.customRightShort
+                if (mapped == com.aeriotv.android.core.remote.PlayerRemoteAction.SEEK_BACKWARD ||
+                    mapped == com.aeriotv.android.core.remote.PlayerRemoteAction.SEEK_FORWARD
+                ) {
+                    Log.i(
+                        TAG,
+                        "[VOD] remote map ${if (isLeft) "Left" else "Right"} -> seek " +
+                            if (fwd) "+${SkipIntervals.forwardMs / 1000} s" else "-${SkipIntervals.backMs / 1000} s",
+                    )
+                }
+                // seekPlayer has already set positionMs to the target, so log
+                // the press-time position captured above (the old line read
+                // "from=<target>", which looked like a seek landing short).
+                com.aeriotv.android.ui.tv.TvFocusTrace.player("vod hidden-chrome skip fwd=$fwd from=$skipFromMs to=$positionMs")
+            }
+            VodHiddenChromeScrub.PLAY_PAUSE -> exoPlayer?.let { it.playWhenReady = !it.playWhenReady }
+            else -> Unit
+        }
     }
     // Commit an in-progress scrub immediately (OK press, iOS "Select commits
     // an in-progress scrub right away"). Setting scrubTargetMs back to null
@@ -868,7 +944,10 @@ fun VODPlayerScreen(
         // next open instead of resuming into its last minutes. Movies get
         // the same rule from the detail screen's Play / Resume split; a
         // recording has no detail screen, so the player applies it.
-        val finishedRecording = progressMeta?.vodType == "recording" &&
+        // Not for an in-progress recording: its duration keeps growing, so a
+        // position near the old written end reads as "finished" and Resume
+        // restarted from 0 (Streamer 2026-10-12, recording 130).
+        val finishedRecording = progressMeta?.vodType == "recording" && !isDvr &&
             existing != null && existing.isFinished
         savedPositionMs = PhoneVodMini.resumePosition(videoId, if (finishedRecording) -1L else existing?.positionMs ?: -1L)
     }
@@ -962,7 +1041,7 @@ fun VODPlayerScreen(
                                 scrubAccelCount = 0
                                 scrubLastDirection = 0
                                 val maxPos = if (durationMs > 0L) {
-                                    if (dvrActive) (durationMs - 5_000L).coerceAtLeast(0L) else durationMs
+                                    if (dvrActive) (durationMs - DVR_WRITTEN_END_GUARD_MS).coerceAtLeast(0L) else durationMs
                                 } else Long.MAX_VALUE
                                 val target = min(maxPos, positionMs + SkipIntervals.forwardMs)
                                 seekPlayer(target); reveal()
@@ -980,16 +1059,9 @@ fun VODPlayerScreen(
                         // A long press that STARTS with the chrome hidden scrubs
                         // exactly as it does with the chrome showing, revealing the
                         // chrome and the scrub position as it goes.
-                        val skipMode = VodHiddenChromeScrub.skipDecision(isRepeat, chromeVisible, now)
+                        val skipMode = VodHiddenChromeScrub.skipDecision(true, isRepeat, chromeVisible, now)
                         if (skipMode != VodHiddenChromeScrub.NOT_SKIP) {
-                            // Skip Without Controls: seek, chrome stays hidden.
-                            if (skipMode == VodHiddenChromeScrub.SKIP) {
-                                scrubTargetMs = null
-                                scrubAccelCount = 0
-                                scrubLastDirection = 0
-                                seekPlayer(max(0L, positionMs - SkipIntervals.backMs))
-                                com.aeriotv.android.ui.tv.TvFocusTrace.player("vod hidden-chrome skip dir=-1 from=$positionMs")
-                            }
+                            vodHiddenChromeAction(skipMode, true)
                             return@onPreviewKeyEvent true
                         }
                         if (VodHiddenChromeScrub.shouldScrub(isRepeat, chromeVisible)) {
@@ -1011,20 +1083,9 @@ fun VODPlayerScreen(
                         // A long press that STARTS with the chrome hidden scrubs
                         // exactly as it does with the chrome showing, revealing the
                         // chrome and the scrub position as it goes.
-                        val skipMode = VodHiddenChromeScrub.skipDecision(isRepeat, chromeVisible, now)
+                        val skipMode = VodHiddenChromeScrub.skipDecision(false, isRepeat, chromeVisible, now)
                         if (skipMode != VodHiddenChromeScrub.NOT_SKIP) {
-                            // Skip Without Controls: seek, chrome stays hidden.
-                            if (skipMode == VodHiddenChromeScrub.SKIP) {
-                                scrubTargetMs = null
-                                scrubAccelCount = 0
-                                scrubLastDirection = 0
-                                seekPlayer(min(
-                                    if (durationMs <= 0L) Long.MAX_VALUE
-                                    else if (dvrActive) (durationMs - 5_000L).coerceAtLeast(0L) else durationMs,
-                                    positionMs + SkipIntervals.forwardMs,
-                                ))
-                                com.aeriotv.android.ui.tv.TvFocusTrace.player("vod hidden-chrome skip dir=+1 from=$positionMs")
-                            }
+                            vodHiddenChromeAction(skipMode, false)
                             return@onPreviewKeyEvent true
                         }
                         if (VodHiddenChromeScrub.shouldScrub(isRepeat, chromeVisible)) {
@@ -1119,10 +1180,14 @@ fun VODPlayerScreen(
                 // in AerioExoPlayerHolder because VOD users tolerate a
                 // slightly slower start in exchange for smoother seeking
                 // and fewer rebuffers across the duration of a long film.
+                // Apple #93 parity: an in-progress recording caps the forward
+                // buffer at 15 s, so start, resume and seek fetch only what is
+                // about to play from a playlist the server is still writing.
+                val inProgressDvr = dvrActive && !dvrMigrated
                 val loadControl = DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
                         /* minBufferMs */ 15_000,
-                        /* maxBufferMs */ 50_000,
+                        /* maxBufferMs */ if (inProgressDvr) 15_000 else 50_000,
                         /* bufferForPlaybackMs */ 2_000,
                         /* bufferForPlaybackAfterRebufferMs */ 5_000,
                     )
@@ -1273,11 +1338,19 @@ fun VODPlayerScreen(
                                 // the same position (iOS parity) instead of
                                 // letting the retry loop hammer a URL that
                                 // will never come back.
+                                if (dvrMigrated && dvrMigratedFromMs >= 0L && dvrReturnsToHls < DVR_MAX_HLS_RETURNS) {
+                                    // The /file/ twin failed right after a
+                                    // migration: not finalized yet. Back to
+                                    // the in-progress HLS at the saved spot.
+                                    returnToInProgressHls(this@apply, dvrMigratedFromMs, "error ${error.errorCodeName}")
+                                    return
+                                }
                                 if (dvrActive && completedUrl != null && !dvrMigrated) {
                                     dvrMigrated = true
                                     dvrActive = false
                                     dvrEndPromptVisible = false
                                     val resumeAt = this@apply.currentPosition.coerceAtLeast(0L)
+                                    dvrMigratedFromMs = resumeAt
                                     Log.i(TAG, "DVR finalized mid-watch: migrating to /file/ at ${resumeAt}ms")
                                     this@apply.setMediaItem(
                                         MediaItem.fromUri(completedUrl),
@@ -1298,10 +1371,29 @@ fun VODPlayerScreen(
                                 errorReconnecting = false
                             }
 
+                            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                                if (!dvrActive) return
+                                Log.i(TAG, "[DVR] ${if (playWhenReady) "resume" else "pause"} at ${this@apply.currentPosition / 1000}s")
+                            }
+
                             override fun onPlaybackStateChanged(playbackState: Int) {
                                 // A retry (manual, auto, or the silent native
                                 // re-mint) reached steady playback: dismiss
                                 // the card and reset the escalation.
+                                // A migrated /file/ that is ready but not
+                                // seekable (no cues yet) is still being
+                                // written; a resume position would restart it
+                                // from the top.
+                                if (playbackState == Player.STATE_READY && dvrMigrated && dvrMigratedFromMs >= 0L) {
+                                    if (!this@apply.isCurrentMediaItemSeekable && dvrMigratedFromMs > 0L &&
+                                        dvrReturnsToHls < DVR_MAX_HLS_RETURNS
+                                    ) {
+                                        returnToInProgressHls(this@apply, dvrMigratedFromMs, "unseekable")
+                                        return
+                                    }
+                                    dvrMigratedFromMs = -1L
+                                }
+                                if (playbackState == Player.STATE_READY) dvrStatusText = null
                                 if (playbackState == Player.STATE_READY &&
                                     playbackErrorMessage != null
                                 ) {
@@ -1956,7 +2048,7 @@ fun VODPlayerScreen(
                     },
                     onSkipForward = {
                         val maxPos = if (durationMs > 0) {
-                            if (dvrActive) (durationMs - 5_000L).coerceAtLeast(0L) else durationMs
+                            if (dvrActive) (durationMs - DVR_WRITTEN_END_GUARD_MS).coerceAtLeast(0L) else durationMs
                         } else {
                             Long.MAX_VALUE
                         }
@@ -2127,6 +2219,22 @@ fun VODPlayerScreen(
                     }
                 }
             }
+        }
+
+        // Apple #93 parity: status while a not-finalized /file/ falls back
+        // to the in-progress HLS (same wording as Apple).
+        dvrStatusText?.let { msg ->
+            androidx.compose.material3.Text(
+                text = msg,
+                color = androidx.compose.ui.graphics.Color.White,
+                modifier = Modifier
+                    .align(androidx.compose.ui.Alignment.Center)
+                    .background(
+                        androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.6f),
+                        androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                    )
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
         }
 
         // Task #150 (iOS parity): playback-error card. Shows the real error,

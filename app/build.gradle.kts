@@ -52,8 +52,8 @@ android {
         applicationId = "com.aeriotv.blue"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6701
-        versionName = "0.5.11-blue.1"
+        versionCode = 6901
+        versionName = "0.5.13-que.1"
         vectorDrawables { useSupportLibrary = true }
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

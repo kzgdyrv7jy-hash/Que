@@ -35,7 +35,7 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.AspectRatio
 import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material3.Icon
@@ -54,6 +54,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -102,7 +104,6 @@ fun CastRemoteSheet(
     onSetTextTrack: (String?) -> Unit,
     onSetSpeed: (Float) -> Unit,
     onSetAspect: (CastControl.AspectMode) -> Unit,
-    onSetAudioOnly: (Boolean) -> Unit,
     onSwitchStream: () -> Unit,
     onSleepMinutes: (Int) -> Unit,
     /** Sleep Timer row subtitle: "N min remaining" while armed, else "Off". */
@@ -149,6 +150,9 @@ fun CastRemoteSheet(
     /** False when the transport reports no seekable range: the inline skip
      *  buttons are still shown, but dimmed and inert. */
     inlineSkipEnabled: Boolean = true,
+    /** False dims Play / Pause to 40% and makes it inert (Radio Mode while
+     *  the stream is Channel Unavailable, until it plays again). */
+    playPauseEnabled: Boolean = true,
     /** Companion transport only (Logan 2026-09-12): drop the AerioTV Remote link
      *  and hide the card while the TV keeps playing. Null for Google Cast, where
      *  there is nothing to leave behind once the session ends. */
@@ -188,6 +192,15 @@ fun CastRemoteSheet(
      *  reports a seekable window (the composited Multiview is live only,
      *  so iOS shows no scrubber and no LIVE caption there). */
     allowWebScrub: Boolean = true,
+    /** Replaces the "<verb> <device>" status line (Radio Mode: "Playing
+     *  channel audio"). */
+    statusLineOverride: String? = null,
+    /** Radio Mode: "Switch to Video Mode" above Stop (back to the full
+     *  player, no re-tune). Null hides it. */
+    onSwitchToVideo: (() -> Unit)? = null,
+    /** Radio Mode's Options set (Apple): Switch Stream, Record Current
+     *  Program, Audio Track and Stream Info only. */
+    radioOptions: Boolean = false,
 ) {
     var optionsOpen by remember { mutableStateOf(false) }
     var audioOpen by remember { mutableStateOf(false) }
@@ -242,7 +255,9 @@ fun CastRemoteSheet(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = if (buffering && switchingTo == null) {
+                    text = if (statusLineOverride != null) {
+                        statusLineOverride
+                    } else if (buffering && switchingTo == null) {
                         "Buffering… on ${deviceName ?: "your TV"}"
                     } else {
                         "$statusVerb ${deviceName ?: "your TV"}"
@@ -484,7 +499,12 @@ fun CastRemoteSheet(
                         groupAlpha,
                     )
                 }
-                if (showPlayPause) PlayPauseButton(isPlaying, onTogglePlayPause, enabled, groupAlpha)
+                if (showPlayPause) PlayPauseButton(
+                    isPlaying,
+                    onTogglePlayPause,
+                    enabled && playPauseEnabled,
+                    if (playPauseEnabled) groupAlpha else 0.4f,
+                )
                 if (showSkipButtons) {
                     LabeledRemoteButton(
                         SkipIntervals.forwardIcon(forwardSeconds),
@@ -516,6 +536,15 @@ fun CastRemoteSheet(
                     contentColor = Color.White,
                     background = Color.White.copy(alpha = 0.12f),
                     onClick = onChangeDevice,
+                )
+            }
+            if (onSwitchToVideo != null) {
+                WideButton(
+                    icon = Icons.Filled.Videocam,
+                    label = "Switch to Video Mode",
+                    contentColor = Color.White,
+                    background = Color.White.copy(alpha = 0.12f),
+                    onClick = onSwitchToVideo,
                 )
             }
             // Red text and stop glyph on translucent red, as iOS.
@@ -569,7 +598,9 @@ fun CastRemoteSheet(
                         onSwitchStream()
                     }
                     Text(
-                        text = "Swaps this channel's upstream. The TV keeps playing; the picture follows in a few seconds.",
+                        // Radio has no TV and no picture (Onn 2026-10-13).
+                        text = if (radioOptions) "Swaps this channel's upstream. Audio keeps playing while the stream switches."
+                            else "Swaps this channel's upstream. The TV keeps playing; the picture follows in a few seconds.",
                         style = MaterialTheme.typography.bodySmall.subtext(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 52.dp, end = 12.dp, bottom = 6.dp),
@@ -585,6 +616,7 @@ fun CastRemoteSheet(
                     optionsOpen = false
                     audioOpen = true
                 }
+                if (!radioOptions) {
                 OptionRow(Icons.Filled.Subtitles, "Subtitles", if (remoteState.textOff) "Off" else remoteState.text.firstOrNull { it.selected }?.label ?: "On") {
                     optionsOpen = false
                     subsOpen = true
@@ -600,8 +632,6 @@ fun CastRemoteSheet(
                     optionsOpen = false
                     sleepOpen = true
                 }
-                OptionRow(Icons.Filled.VideocamOff, "Audio Only", if (remoteState.audioOnly) "On" else "Off") {
-                    onSetAudioOnly(!remoteState.audioOnly)
                 }
                 OptionRow(Icons.Filled.Info, "Stream Info", null) {
                     optionsOpen = false
@@ -883,7 +913,13 @@ private fun PlayPauseButton(
             .alpha(groupAlpha)
             .clip(RoundedCornerShape(12.dp))
             .clickable(enabled = enabled, onClick = onClick)
-            .semantics(mergeDescendants = true) { contentDescription = label },
+            .semantics(mergeDescendants = true) {
+                contentDescription = label
+                role = androidx.compose.ui.semantics.Role.Button
+                // A greyed Play reports enabled=false to accessibility, not
+                // only clickable=false.
+                if (!enabled) disabled()
+            },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {

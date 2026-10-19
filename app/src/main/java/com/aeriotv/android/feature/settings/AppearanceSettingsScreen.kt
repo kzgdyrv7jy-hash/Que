@@ -78,13 +78,14 @@ import com.aeriotv.android.ui.settings.SettingsSection
 import com.aeriotv.android.ui.settings.SettingsSubPageHost
 import com.aeriotv.android.ui.settings.SettingsTextField
 import com.aeriotv.android.ui.settings.settingsFormWidth
-import com.aeriotv.android.ui.settings.dpadFocusWash
+import com.aeriotv.android.ui.settings.settingsRowFocusCard
 import com.aeriotv.android.core.preferences.TEXT_SCALE_MAX
 import com.aeriotv.android.core.preferences.TEXT_SCALE_MIN
 import com.aeriotv.android.ui.theme.AppTheme
 import com.aeriotv.android.ui.tv.dpadFocusEscape
 import kotlin.math.roundToInt
 import com.aeriotv.android.ui.theme.AppearanceMode
+import com.aeriotv.android.ui.theme.LocalAppTheme
 import com.aeriotv.android.ui.adaptive.LocalTabBarBottomInset
 
 /**
@@ -141,6 +142,8 @@ fun AppearanceSettingsScreen(
     val currentTheme by viewModel.selectedTheme.collectAsStateWithLifecycle(initialValue = AppTheme.RoyalBlue)
     val appearanceMode by viewModel.appearanceMode.collectAsStateWithLifecycle(initialValue = AppearanceMode.Dark)
     val isTv = rememberIsTvDevice()
+    val que = isTv && LocalAppTheme.current == AppTheme.RoyalBlue
+    val exitAppearance = LocalQueAppearanceExit.current ?: onBack
     val textScale by viewModel.textScale.collectAsStateWithLifecycle(initialValue = 1.0f)
     val subtextScale by viewModel.subtextScale.collectAsStateWithLifecycle(initialValue = 1.0f)
     val textContrast by viewModel.textContrast.collectAsStateWithLifecycle(initialValue = 0f)
@@ -153,14 +156,14 @@ fun AppearanceSettingsScreen(
 
     SettingsSubPageHost {
     Column(modifier = Modifier.fillMaxSize()) {
-        SettingsDetailTopBar(title = "Appearance", onBack = onBack)
+        if (!que) SettingsDetailTopBar(title = "Appearance", onBack = onBack)
 
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.TopCenter,
         ) {
             LazyColumn(
-                modifier = Modifier.settingsFormWidth(),
+                modifier = if (que) Modifier.fillMaxWidth() else Modifier.settingsFormWidth(),
                 // Bottom padding covers the bottom-nav bar (~80 dp) plus
                 // 24 dp breathing room, so the last LazyColumn item ("Reset
                 // Colors to Defaults" under the Palette card) isn't clipped
@@ -171,11 +174,38 @@ fun AppearanceSettingsScreen(
                 contentPadding = PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
-                    top = 12.dp,
-                    bottom = LocalTabBarBottomInset.current,
+                    top = if (que) 16.dp else 12.dp,
+                    bottom = LocalTabBarBottomInset.current + if (que) 24.dp else 0.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
+                if (que) {
+                    item("que-appearance-picker") {
+                        QueAppearancePicker(
+                            currentTheme = currentTheme,
+                            appearanceMode = appearanceMode,
+                            onThemeSelected = viewModel::setSelectedTheme,
+                            onModeSelected = viewModel::setAppearanceMode,
+                            onAllSettings = exitAppearance,
+                        )
+                    }
+                    item("que-additional-appearance") {
+                        SettingsSection(header = "Additional appearance settings") {
+                            CustomAccentRow(
+                                enabled = useCustomAccent,
+                                hex = customAccentHex,
+                                onToggle = viewModel::setUseCustomAccent,
+                                onPick = { accentPickerOpen = true },
+                            )
+                            com.aeriotv.android.ui.settings.SettingsToggleRow(
+                                title = "True Black Background",
+                                subtitle = "Use pure black for backgrounds, for OLED screens.",
+                                checked = trueBlack,
+                                onCheckedChange = viewModel::setTrueBlack,
+                            )
+                        }
+                    }
+                } else {
                 // COLOR THEME card - the brand presets. Apple splits the old
                 // combined "Theme" card into Color Theme / Light and Dark Mode
                 // / Accent; Android matches that structure here.
@@ -304,6 +334,8 @@ fun AppearanceSettingsScreen(
                         customAccentHex = customAccentHex.takeIf { useCustomAccent },
                         trueBlack = trueBlack,
                     )
+                }
+
                 }
 
                 // TEXT SIZE card: one app-wide multiplier on every sp (applied
@@ -476,7 +508,7 @@ internal fun ThemeRow(
 ) {
     Row(
         modifier = modifier
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -520,7 +552,11 @@ internal fun ThemeRow(
 }
 
 private fun themeSubtitle(theme: AppTheme): String = when (theme) {
-    AppTheme.RoyalBlue -> "Royal blue with navy panels (default)"
+    AppTheme.RoyalBlue -> "Classic cobalt blue TV guide (default)"
+    AppTheme.SkyBlue -> "Fresh sky blue"
+    AppTheme.PowderBlue -> "Soft powder blue"
+    AppTheme.Arctic -> "Cool pale Arctic blue"
+    AppTheme.Ocean -> "Clear ocean blue"
     AppTheme.Aerio -> "Cyan on deep navy"
     AppTheme.Midnight -> "Cool blue on near-black"
     AppTheme.Sunset -> "Warm orange on near-black"
@@ -568,7 +604,7 @@ private fun CustomAccentRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable {
                 val next = !enabled
                 onToggle(next)
@@ -796,7 +832,7 @@ internal fun ToggleRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable { onCheckedChange(!checked) }
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1037,7 +1073,7 @@ internal fun CategoryPaletteRow(
     val swatch = parseHex(hex)
     Row(
         modifier = modifier
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1083,7 +1119,7 @@ internal fun AddMoreCategoriesRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,

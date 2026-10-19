@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.PlayArrow
@@ -76,7 +77,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.aeriotv.android.ui.AerioTextButton as TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -178,8 +179,8 @@ fun PlayerChromeOverlay(
     onShowPlaybackSpeed: () -> Unit,
     videoScaleLabel: String,
     onCycleVideoScale: () -> Unit,
-    onToggleAudioOnly: () -> Unit,
-    audioOnly: Boolean,
+    /** Radio Mode from the options menu; null hides it (casting, VOD). */
+    onRadioMode: (() -> Unit)? = null,
     onSetSleepMinutes: (Int) -> Unit,
     sleepRemainingMillis: Long?,
     onInteractingChange: (Boolean) -> Unit = {},
@@ -511,7 +512,6 @@ fun PlayerChromeOverlay(
                         onDismiss = { moreOpen = false },
                         isTv = true,
                         canRecord = canRecord,
-                        audioOnly = audioOnly,
                         sleepActive = sleepRemainingMillis != null,
                         scaleLabel = videoScaleLabel,
                         onCycleScale = onCycleVideoScale,
@@ -544,10 +544,7 @@ fun PlayerChromeOverlay(
                             moreOpen = false
                             onShowSwitchStream()
                         },
-                        onAudioOnly = {
-                            moreOpen = false
-                            onToggleAudioOnly()
-                        },
+                        onRadioMode = onRadioMode?.let { r -> { moreOpen = false; r() } },
                         keptLive = keptLive,
                         onKeptTune = { id ->
                             moreOpen = false
@@ -679,7 +676,6 @@ fun PlayerChromeOverlay(
                         expanded = moreOpen,
                         onDismiss = { moreOpen = false },
                         canRecord = canRecord,
-                        audioOnly = audioOnly,
                         sleepActive = sleepRemainingMillis != null,
                         scaleLabel = videoScaleLabel,
                         onCycleScale = onCycleVideoScale,
@@ -712,10 +708,7 @@ fun PlayerChromeOverlay(
                             moreOpen = false
                             onShowSwitchStream()
                         },
-                        onAudioOnly = {
-                            moreOpen = false
-                            onToggleAudioOnly()
-                        },
+                        onRadioMode = onRadioMode?.let { r -> { moreOpen = false; r() } },
                         keptLive = keptLive,
                         onKeptTune = { id ->
                             moreOpen = false
@@ -1173,7 +1166,6 @@ private fun PlayerMoreMenu(
     onDismiss: () -> Unit,
     isTv: Boolean = false,
     canRecord: Boolean,
-    audioOnly: Boolean,
     sleepActive: Boolean,
     scaleLabel: String,
     onCycleScale: () -> Unit,
@@ -1185,7 +1177,8 @@ private fun PlayerMoreMenu(
     onStreamInfo: () -> Unit,
     canSwitchStream: Boolean,
     onSwitchStream: () -> Unit,
-    onAudioOnly: () -> Unit,
+    /** Radio Mode (null = hidden, e.g. while casting). */
+    onRadioMode: (() -> Unit)? = null,
     keptLive: List<com.aeriotv.android.core.timeshift.TimeshiftController.RetainedChannel> = emptyList(),
     onKeptTune: (String) -> Unit = {},
     onKeptStop: (String) -> Unit = {},
@@ -1333,28 +1326,19 @@ private fun PlayerMoreMenu(
             )
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-        DropdownMenuItem(
-            leadingIcon = {
-                Icon(
-                    imageVector = if (audioOnly)
-                        Icons.Filled.MusicNote
-                    else
-                        Icons.Outlined.MusicNote,
-                    contentDescription = null,
-                    tint = if (audioOnly)
-                        MaterialTheme.colorScheme.primary
-                    else
-                        MaterialTheme.colorScheme.onSurface,
-                )
-            },
-            text = {
-                // iOS toggles the label to "Show Video" when in Audio
-                // Only mode so the action describes what tapping does,
-                // not what state it shows. Port that.
-                Text(if (audioOnly) "Show Video" else "Audio Only")
-            },
-            onClick = onAudioOnly,
-        )
+        if (onRadioMode != null) {
+            DropdownMenuItem(
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Radio,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                },
+                text = { Text("Radio Mode") },
+                onClick = onRadioMode,
+            )
+        }
         // Keep Recent Channels Live: the same rows as the nav-bar card, which
         // is not shown over the fullscreen player. Name tunes (adopting the
         // kept stream), Stop releases it.
@@ -2289,6 +2273,9 @@ fun SwitchStreamSheet(
     saving: Boolean = false,
     /** The full new stream id order to persist. */
     onReorder: (List<Int>) -> Unit = {},
+    /** Replaces the footer's first sentence (Radio Mode: "Audio keeps
+     *  playing while the stream switches."). */
+    footerText: String? = null,
 ) {
     // Reorder mode: the sheet never drags or swipes away. A handle drag owns
     // the finger, and a quick drag on a row body (Onn 2026-10-04 23:20:45,
@@ -2340,7 +2327,7 @@ fun SwitchStreamSheet(
                     modifier = Modifier.weight(1f),
                 )
                 if (canReorderList && !isTv) {
-                    androidx.compose.material3.TextButton(
+                    com.aeriotv.android.ui.AerioTextButton(
                         enabled = !saving && !rowDragging,
                         onClick = {
                             if (reordering) finishReorder("finish")
@@ -2388,11 +2375,8 @@ fun SwitchStreamSheet(
             // Apple SwitchStreamView footer, phones and tablets only.
             if (streams.isNotEmpty() && !isTv) {
                 com.aeriotv.android.ui.settings.SettingsSectionFooter(
-                    text = if (canReorderList) {
-                        "Switches the active upstream for this channel. The picture follows in a few seconds. Tap Reorder to change the stream priority."
-                    } else {
-                        "Switches the active upstream for this channel. The picture follows in a few seconds."
-                    },
+                    text = (footerText ?: "Switches the active upstream for this channel. The picture follows in a few seconds.") +
+                        if (canReorderList) " Tap Reorder to change the stream priority." else "",
                 )
             }
             Spacer(Modifier.height(12.dp))

@@ -14,6 +14,8 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aeriotv.android.core.remote.RemoteHint
+import com.aeriotv.android.ui.theme.forText
+import com.aeriotv.android.ui.theme.textAccent
 
 /**
  * The remote hint strip (Logan's design, approved 2026-09-11): ONE line of
@@ -34,9 +36,9 @@ fun TvRemoteHintStrip(
     // tvOS theme coloring (Logan 2026-09-11): key names in the theme accent,
     // actions in the same accent muted, separators fainter still, so changing
     // the app theme recolors every strip. Same on all three surfaces.
-    keyColor: Color = MaterialTheme.colorScheme.primary,
-    actionColor: Color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
-    separatorColor: Color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+    keyColor: Color = MaterialTheme.colorScheme.textAccent.forText(),
+    actionColor: Color = MaterialTheme.colorScheme.textAccent.copy(alpha = 0.6f).forText(),
+    separatorColor: Color = MaterialTheme.colorScheme.textAccent.copy(alpha = 0.35f).forText(),
 ) {
     if (hints.isEmpty()) return
     val text = buildAnnotatedString {

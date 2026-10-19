@@ -73,6 +73,11 @@ object MiniPlayerChrome {
      *  keeps the two aligned. */
     val timelineTopPx = MutableStateFlow(0f)
 
+    /** Que Live TV list's measured preview frame in activity-root pixels.
+     *  Null outside the active split list; the same persistent player moves
+     *  into this frame without replacing its surface or playback session. */
+    val listPreviewBoundsPx = MutableStateFlow<androidx.compose.ui.geometry.Rect?>(null)
+
     /** True while the TV shell's Settings tab is selected. The corner mini
      *  slides mostly off the trailing edge (a [stashSliver] of video stays on
      *  screen) so it never covers Settings, and slides back out the moment

@@ -128,6 +128,9 @@ fun GuideGrid(
     remoteAction: (RemoteSlot) -> GuideRemoteAction,
     /** Host-level actions (group pills, mini player, program info, search). Return true if handled. */
     onHostAction: (GuideRemoteAction) -> Boolean,
+    /** Hands the host this grid's action runner, so the guide's mapped Back
+     *  and Hold Back run the same code as every other mapped press. */
+    onActionRunner: ((GuideRemoteAction) -> Boolean) -> Unit = {},
     focusRequester: FocusRequester,
     /** False while the TV sidebar's Shift guide pane owns focus beside the grid. */
     focusEnabled: Boolean = true,
@@ -243,6 +246,7 @@ fun GuideGrid(
             else -> onHostAction(action)
         }
     }
+    androidx.compose.runtime.SideEffect { onActionRunner(runAction) }
     // UP out of the grid must land on the CURRENT tab's pill (Logan
     // 2026-09-02), never on whichever pill is geometrically nearest: the nav
     // switches tabs on focus, so a geometric search opened On Demand.
@@ -466,7 +470,17 @@ fun GuideGrid(
                     }
                     true
                 }
-                else -> false
+                else -> {
+                    // Android#114: a learned button's In the Guide action.
+                    val learned = com.aeriotv.android.core.remote.LearnedButtons
+                        .current[event.nativeKeyEvent.keyCode]
+                        ?.guide?.takeIf { it != GuideRemoteAction.NONE }
+                    if (learned != null) {
+                        traceBy = "grid-learned"
+                        if (down && repeat == 0) runAction(learned)
+                        true
+                    } else false
+                }
             }
         } finally {
             Trace.endSection()
@@ -638,13 +652,14 @@ private fun TimeHeader(
 ) {
     // Apple TV: time labels in the accent colour.
     // Apple iOS: time labels textSecondary on an appBackground strip.
+    val que = isTv && com.aeriotv.android.ui.theme.isQueTheme()
     val labelStyle = TextStyle(
         color = if (isTv) MaterialTheme.colorScheme.textAccent else MaterialTheme.colorScheme.onSurfaceVariant,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.Medium,
+        fontSize = if (que) 16.sp else 12.sp,
+        fontWeight = if (que) FontWeight.SemiBold else FontWeight.Medium,
     )
     // Apple iOS: header rule accentPrimary 0.15, no half-hour ticks.
-    val rule = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f)
+    val rule = MaterialTheme.colorScheme.onSurface.copy(alpha = if (que) 0.65f else 0.15f)
     val cornerFill = if (isTv) androidx.compose.ui.graphics.Color.Transparent else MaterialTheme.colorScheme.surface
     val clockMode = rememberClockMode()
     val fmt = remember(clockMode) { ClockFormat.guideLabel(clockMode) }
@@ -682,7 +697,7 @@ private fun TimeHeader(
             contentAlignment = Alignment.Center,
         ) {
             val clock = remember(nowMs / 60_000L, clockMode) { ClockFormat.short(clockMode).format(Date(nowMs)) }
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            if (!que || focused || jumpLabel != null) Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 jumpLabel ?: clock,
                 style = MaterialTheme.typography.labelMedium,
@@ -760,9 +775,10 @@ private fun GridRow(
             )
     val colors = MaterialTheme.colorScheme
     // MaterialTheme can update an existing ColorScheme instance in place.
+    val que = isTv && com.aeriotv.android.ui.theme.isQueTheme()
     // Key caches on colour values so a mode change always invalidates them.
     val paletteKey = listOf(colors.primary, colors.background, colors.surface,
-        colors.onSurface, colors.onSurfaceVariant, colors.tertiary)
+        colors.onSurface, colors.onSurfaceVariant, colors.tertiary, que)
     // Only the row that gains or loses focus redraws on a vertical move:
     // derivedStateOf notifies the draw scope only when THIS row's answer
     // changes, instead of every visible row re-recording its cells.
@@ -773,7 +789,7 @@ private fun GridRow(
     // surfaces, textPrimary / textSecondary / textTertiary inks); the TV cell
     // keeps the Apple TV white-on-dark styling.
     val titleInk = colors.onSurface
-    val titleStyle = TextStyle(color = titleInk, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    val titleStyle = TextStyle(color = titleInk, fontSize = if (que) 16.sp else 13.sp, fontWeight = FontWeight.Medium)
     val titleDimStyle = titleStyle.copy(color = titleInk.copy(alpha = 0.55f), fontWeight = FontWeight.Normal)
     // Apple TV cell: bold title, italic accent subtitle, accent-tinted
     // description, then a dim time line with the S/E pill and flag badges.
@@ -785,7 +801,7 @@ private fun GridRow(
     fun cellText(c: Color) = com.aeriotv.android.ui.theme.contrastBlend(c, textContrast, isDark = true)
     // Apple iOS: description and sub-title textSecondary, time textTertiary.
     // colors.onSurfaceVariant / colors.tertiary already carry Text Contrast.
-    val timeStyle = TextStyle(color = if (isTv) cellText(Color.White.copy(alpha = 0.55f)) else colors.tertiary, fontSize = 10.5.sp * subScale)
+    val timeStyle = TextStyle(color = if (isTv) cellText(Color.White.copy(alpha = 0.55f)) else colors.tertiary, fontSize = (if (que) 13.sp else 10.5.sp) * subScale)
     val descStyle = TextStyle(color = if (isTv) cellText(accent.copy(alpha = 0.85f)) else colors.onSurfaceVariant, fontSize = 10.5.sp * subScale)
     val subStyle = TextStyle(color = if (isTv) cellText(accent) else colors.onSurfaceVariant, fontSize = 10.5.sp * subScale, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
     // SEASON / EPISODE PILL (restored 2026-09-19). 0.5.9 moved S/E into the
@@ -832,8 +848,8 @@ private fun GridRow(
     val stripCatchupPainter = androidx.compose.ui.graphics.vector.rememberVectorPainter(androidx.compose.material.icons.Icons.Outlined.History)
     val fmt = remember(clockMode) { ClockFormat.guideLabel(clockMode) }
     // tvOS: a 1 pt hairline gap between cells and rows, nothing wider.
-    val seam = 1f
-    val padH = 8f
+    val seam = if (que) with(LocalDensity.current) { 2.dp.toPx() } else 1f
+    val padH = if (que) with(LocalDensity.current) { 8.dp.toPx() } else 8f
     val appTextScale = com.aeriotv.android.ui.scale.LocalAppTextScale.current
     // Same growth GuideScreen applies to the phone row height.
     val subRowGrowth = 1f + (com.aeriotv.android.ui.scale.LocalSubtextScale.current - 1f).coerceAtLeast(0f) * GUIDE_PHONE_SUBTEXT_SHARE
@@ -919,6 +935,40 @@ private fun GridRow(
         Trace.beginSection("GuideGrid.row")
         // Rail: number, logo, name. Drawn here so a row is ONE draw node and
         // composing a newly visible row costs nothing measurable.
+        if (que) {
+            val cardX = 4.dp.toPx()
+            val cardW = railWidthPx - 8.dp.toPx()
+            val cardH = size.height - 2.dp.toPx()
+            drawRoundRect(surface, topLeft = Offset(cardX, 0f), size = Size(cardW, cardH), cornerRadius = CornerRadius(8.dp.toPx()))
+            val logoW = 56.dp.toPx()
+            val logoH = 38.dp.toPx()
+            val logoX = 10.dp.toPx()
+            val logoY = (cardH - logoH) / 2f
+            if (rail.logos) {
+                drawRoundRect(Color(0xFF202733), topLeft = Offset(logoX, logoY), size = Size(logoW, logoH), cornerRadius = CornerRadius(6.dp.toPx()))
+                val logo = channel.tvgLogo.takeIf { it.isNotBlank() }?.let { logos.bitmap(it) }
+                if (logo != null) {
+                    val fitted = com.aeriotv.android.core.ui.fitArtwork(logoW - 8.dp.toPx(), logoH - 6.dp.toPx(), logo.width.toFloat(), logo.height.toFloat())
+                    drawImage(logo, dstOffset = IntOffset((logoX + 4.dp.toPx() + fitted.left).toInt(), (logoY + 3.dp.toPx() + fitted.top).toInt()), dstSize = IntSize(fitted.width.toInt().coerceAtLeast(1), fitted.height.toInt().coerceAtLeast(1)))
+                } else {
+                    val initials = channel.name.take(3).uppercase()
+                    val mark = textCache.getOrPut(RAIL_QUE_INITIALS_KEY) { CellText(textMeasurer.measure(initials, style = TextStyle(color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold), maxLines = 1), null) }.title
+                    drawText(mark, topLeft = Offset(logoX + (logoW - mark.size.width) / 2f, logoY + (logoH - mark.size.height) / 2f))
+                }
+            }
+            val copyX = if (rail.logos) 72.dp.toPx() else 12.dp.toPx()
+            val copyW = (railWidthPx - copyX - 6.dp.toPx()).toInt().coerceAtLeast(1)
+            val number = if (rail.numbers && !channel.channelNumber.isNullOrBlank()) textCache.getOrPut(RAIL_UNDER_NUMBER_KEY) {
+                CellText(textMeasurer.measure(channel.channelNumber.orEmpty(), style = TextStyle(color = colors.onSurfaceVariant, fontSize = 14.sp, fontWeight = FontWeight.SemiBold), maxLines = 1, overflow = TextOverflow.Ellipsis, constraints = Constraints(maxWidth = copyW)), null)
+            }?.title else null
+            val name = if (rail.names) textCache.getOrPut(RAIL_NAME_KEY) {
+                CellText(textMeasurer.measure(channel.name, style = TextStyle(color = colors.onSurface, fontSize = 16.sp, fontWeight = FontWeight.Medium), maxLines = 1, overflow = TextOverflow.Ellipsis, constraints = Constraints(maxWidth = copyW)), null)
+            }?.title else null
+            val gap = if (number != null && name != null) 1.dp.toPx() else 0f
+            var copyY = (cardH - (number?.size?.height ?: 0) - (name?.size?.height ?: 0) - gap) / 2f
+            number?.let { drawText(it, topLeft = Offset(copyX, copyY)); copyY += it.size.height + gap }
+            name?.let { drawText(it, topLeft = Offset(copyX, copyY)) }
+        } else {
         drawRect(surface, topLeft = Offset.Zero, size = Size(railWidthPx, size.height))
         // TV RAIL BAND (Logan 2026-09-16, final Apple TV layout). Every TV rail
         // cell opens with a dedicated band of [GUIDE_TV_RAIL_BAND]: the channel
@@ -1162,6 +1212,8 @@ private fun GridRow(
         // Phone / tablet: Apple iOS rail rule, accentPrimary 0.20.
         drawLine(colors.onSurface.copy(alpha = 0.15f), Offset(railWidthPx - 0.5f, 0f), Offset(railWidthPx - 0.5f, size.height), strokeWidth = 1.dp.toPx())
 
+        }
+
         // Programme strip.
         clipRect(railWidthPx, 0f, size.width, size.height) {
         translate(left = railWidthPx) {
@@ -1196,6 +1248,12 @@ private fun GridRow(
                 if (cell.startMillis >= ve) break
                 i++
                 if (cell.endMillis <= vs) continue
+                // The 5 minute lead (GuideGridState.leadMs) puts the strip edge
+                // before the first half-hour mark, so a program that already
+                // ended inside the lead drew as an untitled sliver left of the
+                // first header label (Logan 2026-10-15). Leave the lead blank
+                // for those; the airing cell still draws from the edge.
+                if (cell.startMillis < vs && cell.endMillis <= nowMs && cell.endMillis <= vs + state.leadMs) continue
                 val airing = nowMs in cell.startMillis until cell.endMillis
                 val x0 = ((cell.startMillis - vs) * pxPerMs).coerceAtLeast(drawnRight)
                 var x1 = ((cell.endMillis - vs) * pxPerMs).coerceAtMost(stripW)
@@ -1209,7 +1267,9 @@ private fun GridRow(
                 // iOS = accentPrimary 0.25 airing, cardBackground otherwise.
                 val catBase = if (cell.isPlaceholder) null else palette?.resolveBaseColor(cell.category)
                 val fill = when {
+                    que && focused -> com.aeriotv.android.ui.theme.RoyalBlueFocus
                     catBase != null && isTv -> catBase.copy(alpha = (if (focused) 0.55f else if (airing) 0.35f else 0.22f) * tintScale)
+                    que && !cell.isPlaceholder -> if (airing) com.aeriotv.android.ui.theme.RoyalBlueRaised else com.aeriotv.android.ui.theme.RoyalBlueSurface
                     focused -> colors.onSurface.copy(alpha = 0.18f)
                     catBase != null -> catBase.copy(alpha = (if (airing) 0.45f else 0.28f) * tintScale)
                     cell.isPlaceholder -> colors.onSurface.copy(alpha = 0.03f)
@@ -1292,7 +1352,10 @@ private fun GridRow(
                         fun pill(c: EPGProgramme) = if (!showBadges) null else c.seasonEpisodeLabel()
                             ?.let { measure(it, pillStyle, 12.sp.toPx(), maxW = textW / 3) }
                         val title = measure(cell.title, if (cell.isPlaceholder) titleDimStyle else titleStyle, 20.sp.toPx())
-                        if (cell.isPlaceholder || !tall) CellText(title, null) else if (compact) {
+                        if (que && !cell.isPlaceholder) {
+                            val range = rangeCache.getOrPut(cell.startMillis) { shortFmt.format(Date(cell.startMillis)) + " - " + shortFmt.format(Date(cell.endMillis)) }
+                            CellText(title, measure(range, timeStyle, 18.sp.toPx() * subScale, ellipsis = true))
+                        } else if (cell.isPlaceholder || !tall) CellText(title, null) else if (compact) {
                             // Channel Preview (tvOS): title, the subtitle
                             // line, then the S/E pill and flag badges on the
                             // bottom line; the banner carries the time and
@@ -1329,7 +1392,7 @@ private fun GridRow(
                     }
                     clipRect(x0, 0f, x0 + w, size.height) {
                         val x = x0 + padH
-                        var y = 3.dp.toPx()
+                        var y = (if (que) 12.dp else 3.dp).toPx()
                         // Per-program catch-up badge (iPhone EPGGuideView cell,
                         // ChannelListView.canReplay): aired, and still inside the
                         // channel's archive window (capped at 30 days). Drawn
@@ -1368,7 +1431,7 @@ private fun GridRow(
                             val stacked = descLines == 2 && (text.pill != null || text.badges.isNotEmpty())
                             val chipH = time.size.height - 4.dp.toPx()
                             val ty = if (stacked) maxOf(y, size.height - 3.dp.toPx() - chipH - 3.dp.toPx() - time.size.height)
-                                else maxOf(y, size.height - 3.dp.toPx() - time.size.height)
+                                else if (que) maxOf(y + 2.dp.toPx(), size.height - 12.dp.toPx() - time.size.height) else maxOf(y, size.height - 3.dp.toPx() - time.size.height)
                             var bx = x
                             drawText(time, color = ink.time, topLeft = Offset(bx, ty))
                             if (stacked) bx = x else bx += time.size.width + 5.dp.toPx()
@@ -1405,12 +1468,12 @@ private fun GridRow(
             }
             if (nowMs in (vs + 1) until ve) {
                 val x = (nowMs - vs) * pxPerMs
-                drawLine(NOW_RED, Offset(x, 0f), Offset(x, size.height), strokeWidth = 2.dp.toPx())
+                drawLine(NOW_RED, Offset(x, 0f), Offset(x, size.height), strokeWidth = 2.dp.toPx(), pathEffect = if (que) androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(8.dp.toPx(), 8.dp.toPx())) else null)
             }
         }
         }
         // Phone / tablet: Apple iOS row rule, accentPrimary 0.08.
-        drawLine(colors.onSurface.copy(alpha = 0.12f), Offset(0f, size.height - 0.5f), Offset(size.width, size.height - 0.5f), strokeWidth = 1f)
+        if (!que) drawLine(colors.onSurface.copy(alpha = 0.12f), Offset(0f, size.height - 0.5f), Offset(size.width, size.height - 0.5f), strokeWidth = 1f)
         Trace.endSection()
     }
 }
@@ -1490,12 +1553,13 @@ private const val MIN_CELL_PX = 6f
 /** Airing cell clipped at the strip edge never draws narrower than this, so its title shows. */
 private val AIRING_MIN_VISIBLE = 72.dp
 /** GH #127 guide cell info button: glyph size, corner inset, tap target, min visible cell width. */
-private val GUIDE_INFO_BUTTON_SIZE = 18.dp
+internal val GUIDE_INFO_BUTTON_SIZE = 18.dp
 private val GUIDE_INFO_BUTTON_INSET = 5.dp
-private val GUIDE_INFO_BUTTON_HIT = 40.dp
+internal val GUIDE_INFO_BUTTON_HIT = 40.dp
 private val GUIDE_INFO_BUTTON_MIN_CELL = 120.dp
 private const val CELL_TEXT_CACHE_SOFT_CAP = 48
 private const val CELL_TEXT_EVICT_MARGIN_MS = 12 * 3_600_000L
+private const val RAIL_QUE_INITIALS_KEY = Long.MIN_VALUE + 7
 private const val RAIL_NAME_KEY = Long.MIN_VALUE + 2
 private const val RAIL_UNDER_NUMBER_KEY = Long.MIN_VALUE + 3
 

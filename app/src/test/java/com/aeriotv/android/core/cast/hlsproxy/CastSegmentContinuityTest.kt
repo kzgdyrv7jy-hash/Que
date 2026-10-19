@@ -36,7 +36,7 @@ import org.junit.Test
  */
 class CastSegmentContinuityTest {
 
-    private val ffmpeg = File("/opt/homebrew/bin/ffmpeg")
+    private val ffmpeg = hostMediaTool("ffmpeg")
     private val workDir: File by lazy { File("build/tmp/castHlsProxyContinuity").apply { mkdirs() } }
 
     /** One segment's per-track span, in 90 kHz ticks, read back out of

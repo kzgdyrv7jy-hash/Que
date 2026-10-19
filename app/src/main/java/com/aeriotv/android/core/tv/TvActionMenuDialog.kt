@@ -25,8 +25,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -37,6 +39,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aeriotv.android.ui.scale.Dialog
+import com.aeriotv.android.ui.theme.RoyalBlueFocus
+import com.aeriotv.android.ui.theme.ensureTextContrast
+import com.aeriotv.android.ui.theme.isQueTheme
+import com.aeriotv.android.ui.theme.textAccent
 
 /**
  * One row of a [TvActionMenuDialog]. [icon] is nullable because some menus
@@ -76,11 +82,22 @@ fun TvActionMenuDialog(
     guard: TvMenuGuard,
     onDismiss: () -> Unit,
     width: androidx.compose.ui.unit.Dp = 250.dp,
+    // Opens with D-pad focus on the appended Cancel row instead of the first
+    // action (the Exit AerioTV? confirm: a stray OK must not close the app).
+    focusCancel: Boolean = false,
 ) {
+    val cancelFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    if (focusCancel) {
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            // The Dialog window attaches a frame after composition.
+            kotlinx.coroutines.delay(50)
+            runCatching { cancelFocus.requestFocus() }
+        }
+    }
     // Apple TV look (Logan 2026-09-02): a centred translucent card, the
     // title on top, one capsule per action with accent text, the focused
     // capsule ringed like the rest of the app, and a Cancel capsule last.
-    val accent = MaterialTheme.colorScheme.primary
+    val accent = MaterialTheme.colorScheme.textAccent
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(28.dp),
@@ -126,6 +143,11 @@ fun TvActionMenuDialog(
                     destructive = false,
                     accent = accent,
                     onActivate = guard.wrap { onDismiss() },
+                    modifier = if (focusCancel) {
+                        Modifier.focusRequester(cancelFocus)
+                    } else {
+                        Modifier
+                    },
                 )
             }
         }
@@ -140,16 +162,27 @@ private fun TvMenuCapsule(
     destructive: Boolean,
     accent: Color,
     onActivate: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
     var okLatched by remember { mutableStateOf(false) }
-    val textColor = when {
-        !enabled -> accent.copy(alpha = 0.35f)
-        destructive -> MaterialTheme.colorScheme.error
-        else -> accent
-    }
+    val colors = MaterialTheme.colorScheme
+    val queTheme = isQueTheme()
+    val fill = if (focused && queTheme) RoyalBlueFocus
+    else colors.onSurface.copy(alpha = if (focused) 0.14f else 0.08f).compositeOver(colors.surface)
+    val textColor = ensureTextContrast(
+        when {
+            !enabled -> accent.copy(alpha = 0.35f)
+            destructive -> colors.error
+            queTheme -> colors.onSurface
+            else -> accent
+        },
+        fill,
+        minimum = if (enabled) 4.5f else 3f,
+    )
+    val focusRing = if (queTheme) Color.White else ensureTextContrast(accent, fill, minimum = 3f)
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 38.dp)
             // Clip BEFORE clickable so the focus/press highlight follows the
@@ -177,14 +210,13 @@ private fun TvMenuCapsule(
                     else -> false
                 }
             }
-            // Pill canon (Logan 2026-09-05 / 2026-09-10): a menu action is
-            // never "selected", so focus is the ACCENT ring over a quiet
-            // translucent fill, like every other unselected pill.
+            // Resolve an opaque capsule first so its ink remains legible on
+            // light surfaces, blue surfaces, and custom accents alike.
             .background(
-                color = Color.White.copy(alpha = if (focused) 0.14f else 0.08f),
+                color = fill,
                 shape = RoundedCornerShape(19.dp),
             )
-            .border(2.dp, if (focused) accent else Color.Transparent, RoundedCornerShape(19.dp))
+            .border(2.dp, if (focused) focusRing else Color.Transparent, RoundedCornerShape(19.dp))
             .clickable(enabled = enabled, onClick = onActivate),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,

@@ -1,6 +1,9 @@
 package com.aeriotv.android.feature.livetv
 
 import com.aeriotv.android.ui.theme.textAccent
+import com.aeriotv.android.ui.theme.RoyalBlueFocus
+import com.aeriotv.android.ui.theme.ensureTextContrast
+import com.aeriotv.android.ui.theme.isQueTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -52,6 +55,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.focusGroup
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -387,33 +391,56 @@ private fun GroupSidebarRow(
             onLongClick = { onSetDefault(); menuGuard.arm() },
         )
     }
+    val colors = MaterialTheme.colorScheme
+    val que = isQueTheme()
+    val wash = when {
+        focused && que -> RoyalBlueFocus
+        focused && isTv -> colors.onBackground.copy(alpha = 0.16f)
+        focused -> colors.primary.copy(alpha = 0.18f)
+        isActive && isTv -> colors.primary.copy(alpha = 0.12f)
+        isActive -> colors.secondaryContainer
+        else -> Color.Transparent
+    }
+    // Paint the resolved fill so the same ink also works over a gradient or
+    // a player overlay; focus must never depend on hardcoded white text.
+    val resolvedFill = wash.compositeOver(colors.background)
+    val rowFill = if (focused || isActive) resolvedFill else Color.Transparent
+    val rowInk = ensureTextContrast(
+        when {
+            focused && que -> Color.White
+            isActive && !focused && isTv -> colors.primary
+            isActive && !focused -> colors.onSecondaryContainer
+            else -> colors.onBackground
+        },
+        resolvedFill,
+    )
+    val focusRing = ensureTextContrast(
+        if (que) Color.White else colors.primary,
+        listOf(resolvedFill, colors.background),
+        minimum = 3f,
+    )
     if (isTv) {
-        // tvOS GroupSidebarRowButtonStyle (halved): 30 pt text, 20/12 padding,
-        // corner 10, focused = white 16% wash + inset accent ring + white
-        // text, active = accent text, semibold, accent 12% tint.
-        val colors = MaterialTheme.colorScheme
-        val fg = when { focused -> Color.White; isActive -> colors.primary; else -> colors.onBackground }
-        val bg = when { focused -> Color.White.copy(alpha = 0.16f); isActive -> colors.primary.copy(alpha = 0.12f); else -> Color.Transparent }
+        // tvOS dimensions, with focus ink resolved for the active palette.
         Row(
             modifier = modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(5.dp))
-                .background(bg)
-                .border(2.dp, if (focused) colors.primary else Color.Transparent, RoundedCornerShape(5.dp))
+                .background(rowFill)
+                .border(2.dp, if (focused) focusRing else Color.Transparent, RoundedCornerShape(5.dp))
                 .then(rowClick)
                 .focusable(interactionSource = interaction)
                 .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (leadingStar) Icon(Icons.Filled.Star, contentDescription = null, tint = fg, modifier = Modifier.size(11.dp))
+            if (leadingStar) Icon(Icons.Filled.Star, contentDescription = null, tint = rowInk, modifier = Modifier.size(11.dp))
             Text(
                 text = label, fontSize = 15.sp, lineHeight = 18.sp,
                 fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
-                color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                color = rowInk, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f, fill = false),
             )
-            if (trailingPin) Icon(Icons.Filled.PushPin, contentDescription = "Default group", tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(7.dp))
+            if (trailingPin) Icon(Icons.Filled.PushPin, contentDescription = "Default group", tint = ensureTextContrast(rowInk.copy(alpha = 0.7f), resolvedFill, minimum = 3f), modifier = Modifier.size(7.dp))
         }
         return
     }
@@ -425,18 +452,12 @@ private fun GroupSidebarRow(
             .fillMaxWidth()
             .tvFocusScale(focused, focusedScale = 1.02f)
             .clip(RoundedCornerShape(12.dp))
-            .background(
-                when {
-                    focused -> MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
-                    isActive -> MaterialTheme.colorScheme.secondaryContainer
-                    else -> Color.Transparent
-                },
-            )
+            .background(rowFill)
             .then(
                 if (focused) {
                     Modifier.border(
                         2.dp,
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+                        focusRing,
                         RoundedCornerShape(12.dp),
                     )
                 } else {
@@ -454,8 +475,7 @@ private fun GroupSidebarRow(
             text = label,
             style = groupSidebarRowStyle(),
             fontWeight = FontWeight.Medium,
-            color = if (isActive && !focused) MaterialTheme.colorScheme.onSecondaryContainer
-            else MaterialTheme.colorScheme.onBackground,
+            color = rowInk,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

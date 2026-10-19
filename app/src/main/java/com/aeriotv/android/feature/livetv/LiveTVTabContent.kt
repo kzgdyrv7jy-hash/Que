@@ -91,11 +91,17 @@ fun LiveTVTabContent(
     // a phone used to clobber the Guide default on a TV). The persisted default
     // lives solely in the Settings choice. Re-seeds whenever the resolved default
     // changes -- a Settings edit, or the pref syncing in after cold start.
-    var mode by rememberSaveable(resolvedDefault) { mutableStateOf(resolvedDefault) }
-    val canToggle = formFactor.supportsToggle
+    var localMode by rememberSaveable(resolvedDefault) { mutableStateOf(resolvedDefault) }
+    val sessionMode = LocalLiveTvSessionMode.current
+    val mode = sessionMode?.value ?: localMode
+    val selectMode: (LiveTVViewMode) -> Unit = {
+        if (sessionMode != null) sessionMode.value = it else localMode = it
+    }
+    // Que exposes separate Live TV / Guide rail entries instead of a duplicate toggle.
+    val canToggle = formFactor.supportsToggle && sessionMode == null
     val toggleMode: () -> Unit = {
         if (canToggle) {
-            mode = if (mode == LiveTVViewMode.List) LiveTVViewMode.Guide else LiveTVViewMode.List
+            selectMode(if (mode == LiveTVViewMode.List) LiveTVViewMode.Guide else LiveTVViewMode.List)
         }
     }
 
@@ -105,6 +111,9 @@ fun LiveTVTabContent(
     // flip or a form-factor change, so a TV without the List view is snapped
     // to the Guide before anything renders.
     val effectiveMode = if (formFactor.listAvailable) mode else LiveTVViewMode.Guide
+    // Android#131: a trim that shed the in-memory guide is repainted from the
+    // Room cache the moment the Live TV tab (guide or list) is shown.
+    androidx.compose.runtime.LaunchedEffect(Unit) { viewModel.repaintGuideIfShed("guide-open") }
 
     // EPG-search / aeriotvblue://guide deep-link jump: force the SESSION view to Guide
     // so the target programme's cell exists for GuideScreen to scroll/focus (it
@@ -115,12 +124,12 @@ fun LiveTVTabContent(
     // List toggle. rememberSaveable survives tab switches but resets on cold start,
     // so a cold-start deep link still forces Guide as intended.
     var consumedJumpKey by rememberSaveable { mutableStateOf("") }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(viewModel, sessionMode) {
         viewModel.guideJumpRequests.collect { jump ->
             val key = "${jump.channelId}@${jump.startMillis}"
             if (key != consumedJumpKey) {
                 consumedJumpKey = key
-                mode = LiveTVViewMode.Guide
+                selectMode(LiveTVViewMode.Guide)
             }
         }
     }

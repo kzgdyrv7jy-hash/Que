@@ -249,10 +249,11 @@ class AppPreferences @Inject constructor(
     /**
      * Settings > Live TV > "Rounded Program Cells". Rounds the guide's program
      * cells at the rail radius, independent of the logo toggle above (GH #87
-     * follow-up: rounded logos with flat cells). Default OFF.
+     * follow-up: rounded logos with flat cells). Que defaults to rounded cells;
+     * a stored preference still takes precedence.
      */
     val roundedProgramCells: Flow<Boolean> =
-        store.data.map { it[KEY_ROUNDED_PROGRAM_CELLS] ?: false }
+        store.data.map { it[KEY_ROUNDED_PROGRAM_CELLS] ?: true }
     suspend fun setRoundedProgramCells(value: Boolean) {
         store.edit { it[KEY_ROUNDED_PROGRAM_CELLS] = value }
     }
@@ -515,6 +516,14 @@ class AppPreferences @Inject constructor(
         store.edit { it[KEY_REMOTE_CONTROL_MAP] = json }
     }
 
+    /** Android#114: buttons taught with Learn Button (LearnedButtons JSON).
+     *  Device-local and never synced: key codes belong to this box's remote. */
+    val learnedRemoteButtons: Flow<Map<Int, com.aeriotv.android.core.remote.LearnedButton>> =
+        store.data.map { com.aeriotv.android.core.remote.LearnedButtons.fromJson(it[KEY_REMOTE_LEARNED_BUTTONS]) }
+    suspend fun setLearnedRemoteButtons(buttons: Collection<com.aeriotv.android.core.remote.LearnedButton>) {
+        store.edit { it[KEY_REMOTE_LEARNED_BUTTONS] = com.aeriotv.android.core.remote.LearnedButtons.toJson(buttons) }
+    }
+
     /**
      * Whether THIS device shares its remote button map through Drive sync.
      *
@@ -534,6 +543,30 @@ class AppPreferences @Inject constructor(
         store.data.map { it[KEY_SYNC_REMOTE_CONTROL_MAP] ?: true }
     suspend fun setSyncRemoteControlMap(value: Boolean) {
         store.edit { it[KEY_SYNC_REMOTE_CONTROL_MAP] = value }
+    }
+
+    /**
+     * Settings > Player > Radio Mode by Default (Discord request, Apple key
+     * radioModeByDefault). Default OFF. When on, every live channel pick goes
+     * the declared radio path (RadioSelect.maybeOpen); the long-press Watch
+     * still plays video. Stays out of the Drive snapshot unless this device
+     * opts in with [syncRadioModeByDefault].
+     */
+    val radioModeByDefault: Flow<Boolean> =
+        store.data.map { it[KEY_RADIO_MODE_BY_DEFAULT] ?: false }
+    suspend fun setRadioModeByDefault(value: Boolean) {
+        store.edit { it[KEY_RADIO_MODE_BY_DEFAULT] = value }
+    }
+
+    /**
+     * Whether THIS device shares Radio Mode by Default through Drive sync.
+     * Default OFF (slice of App Preferences, like [syncRemoteControlMap]).
+     * Never synced itself; gates both push and pull.
+     */
+    val syncRadioModeByDefault: Flow<Boolean> =
+        store.data.map { it[KEY_SYNC_RADIO_MODE_BY_DEFAULT] ?: false }
+    suspend fun setSyncRadioModeByDefault(value: Boolean) {
+        store.edit { it[KEY_SYNC_RADIO_MODE_BY_DEFAULT] = value }
     }
 
     /**
@@ -654,6 +687,19 @@ class AppPreferences @Inject constructor(
     }
 
     /**
+     * Android#134: switch the display's refresh rate to the measured content
+     * rate (50 / 59.94 / 60 class) while keeping the CURRENT resolution.
+     * Independent of [matchContentResolution]. Before 0.5.12 the rate switch
+     * only ran as part of resolution matching, so an unset key inherits that
+     * toggle and existing users keep exactly what they had. Device-local.
+     */
+    val matchFrameRate: Flow<Boolean> =
+        store.data.map { it[KEY_MATCH_FRAME_RATE] ?: it[KEY_MATCH_CONTENT_RESOLUTION] ?: false }
+    suspend fun setMatchFrameRate(value: Boolean) {
+        store.edit { it[KEY_MATCH_FRAME_RATE] = value }
+    }
+
+    /**
      * Decoded map with the LEGACY MIGRATION applied: a user who had
      * turned "Apple TV Channel Flip" off and has never customized the
      * new map gets upShort/downShort seeded to NONE so their Up/Down
@@ -722,6 +768,22 @@ class AppPreferences @Inject constructor(
         store.data.map { it[KEY_GUIDE_PROGRAM_INFO_BUTTON] ?: GuideProgramInfoButton.OFF }
     suspend fun setGuideProgramInfoButton(value: String) {
         store.edit { it[KEY_GUIDE_PROGRAM_INFO_BUTTON] = value }
+    }
+
+    /** Program Info Button > Guide View (Apple parity 2026-10-13). Unset
+     *  follows the old single setting: on unless that was Off. */
+    val programInfoButtonGuide: Flow<Boolean> = store.data.map {
+        it[KEY_PROGRAM_INFO_BUTTON_GUIDE]
+            ?: ((it[KEY_GUIDE_PROGRAM_INFO_BUTTON] ?: GuideProgramInfoButton.OFF) != GuideProgramInfoButton.OFF)
+    }
+    suspend fun setProgramInfoButtonGuide(value: Boolean) {
+        store.edit { it[KEY_PROGRAM_INFO_BUTTON_GUIDE] = value }
+    }
+
+    /** Program Info Button > List View: the same button on channel list rows. Default off. */
+    val programInfoButtonList: Flow<Boolean> = store.data.map { it[KEY_PROGRAM_INFO_BUTTON_LIST] ?: false }
+    suspend fun setProgramInfoButtonList(value: Boolean) {
+        store.edit { it[KEY_PROGRAM_INFO_BUTTON_LIST] = value }
     }
 
     val playerCardShowChannelLogo: Flow<Boolean> =
@@ -825,6 +887,14 @@ class AppPreferences @Inject constructor(
     val developerForceHls: Flow<Boolean> = store.data.map { it[KEY_DEVELOPER_FORCE_HLS] ?: false }
     suspend fun setDeveloperForceHls(value: Boolean) {
         store.edit { it[KEY_DEVELOPER_FORCE_HLS] = value }
+    }
+
+    /** Dispatcharr hosts (lowercase host:port) whose plain live URL answered
+     *  with an HLS playlist (proxy output set to HLS). Learned by ForceHls so
+     *  the next tune goes straight to the HLS session path. Per device, never synced. */
+    val serverHlsHosts: Flow<Set<String>> = store.data.map { it[KEY_SERVER_HLS_HOSTS] ?: emptySet() }
+    suspend fun setServerHlsHosts(value: Set<String>) {
+        store.edit { it[KEY_SERVER_HLS_HOSTS] = value }
     }
 
     val castForceHevcTranscode: Flow<Boolean> = store.data.map { it[KEY_CAST_FORCE_HEVC_TRANSCODE] ?: false }
@@ -1289,6 +1359,23 @@ class AppPreferences @Inject constructor(
         store.edit { it[KEY_MULTIVIEW_PERF_WARNING_SUPPRESSED] = value }
     }
 
+    /** Add to Multiview picker "Show Subtitles" pill: each channel row adds
+     *  the airing program's subtitle (Teamarr carries "Team 1 vs Team 2"
+     *  there). Remembered across launches; default off. */
+    val multiviewPickerShowSubtitles: Flow<Boolean> =
+        store.data.map { it[KEY_MULTIVIEW_PICKER_SHOW_SUBTITLES] ?: false }
+    suspend fun setMultiviewPickerShowSubtitles(value: Boolean) {
+        store.edit { it[KEY_MULTIVIEW_PICKER_SHOW_SUBTITLES] = value }
+    }
+
+    /** Add to Multiview picker "Show Descriptions" pill: each channel row adds
+     *  the program description (two lines max). Default off. */
+    val multiviewPickerShowDescriptions: Flow<Boolean> =
+        store.data.map { it[KEY_MULTIVIEW_PICKER_SHOW_DESCRIPTIONS] ?: false }
+    suspend fun setMultiviewPickerShowDescriptions(value: Boolean) {
+        store.edit { it[KEY_MULTIVIEW_PICKER_SHOW_DESCRIPTIONS] = value }
+    }
+
     /**
      * iOS `multiviewLayoutMode` parity. One of "auto" (default) / "evenGrid" /
      * "spotlight" / "heroCorner". Selectable per-session from the tile context
@@ -1628,12 +1715,18 @@ class AppPreferences @Inject constructor(
         if (data[KEY_SYNC_REMOTE_CONTROL_MAP] != false) {
             data[KEY_REMOTE_CONTROL_MAP]?.takeIf { it.isNotBlank() }?.let { out["remoteControlMap"] = it }
         }
+        // Slice gate (see syncRadioModeByDefault). Absent reads as false: opt-in.
+        if (data[KEY_SYNC_RADIO_MODE_BY_DEFAULT] == true) {
+            data[KEY_RADIO_MODE_BY_DEFAULT]?.let { out["radioModeByDefault"] = it.toString() }
+        }
         data[KEY_GUIDE_GROUP_SELECTOR]?.let { out["guideGroupSelector"] = it }
         data[KEY_GUIDE_SIDEBAR_LAYOUT]?.let { out["guideSidebarLayout"] = it }
         data[KEY_PHONE_GROUP_SELECTOR]?.let { out["phoneGroupSelector"] = it }
         data[KEY_GUIDE_TUNE_IN_MINI]?.let { out["guideTuneInMini"] = it.toString() }
         data[KEY_GUIDE_PROGRAM_INFO_BUTTON]?.let { out["guideProgramInfoButton"] = it }
         data[KEY_PLAYER_SHOW_CHANNEL_INFO_CARD]?.let { out["playerShowChannelInfoCard"] = it.toString() }
+        data[KEY_PROGRAM_INFO_BUTTON_GUIDE]?.let { out["programInfoButtonGuide"] = it.toString() }
+        data[KEY_PROGRAM_INFO_BUTTON_LIST]?.let { out["programInfoButtonList"] = it.toString() }
         data[KEY_SHOW_REMOTE_HINTS]?.let { out["showRemoteHints"] = it.toString() }
         // Per-device-type: both sync so a TV's choice mirrors to other TVs and a
         // phone's to other phones, independently. Each device reads its own.
@@ -1692,12 +1785,17 @@ class AppPreferences @Inject constructor(
                     if (prefs[KEY_SYNC_REMOTE_CONTROL_MAP] != false) {
                         put("remoteControlMap", KEY_REMOTE_CONTROL_MAP)
                     }
+                    if (prefs[KEY_SYNC_RADIO_MODE_BY_DEFAULT] == true) {
+                        put("radioModeByDefault", KEY_RADIO_MODE_BY_DEFAULT)
+                    }
                     put("guideGroupSelector", KEY_GUIDE_GROUP_SELECTOR)
                     put("guideSidebarLayout", KEY_GUIDE_SIDEBAR_LAYOUT)
                     put("phoneGroupSelector", KEY_PHONE_GROUP_SELECTOR)
                     put("guideTuneInMini", KEY_GUIDE_TUNE_IN_MINI)
                     put("guideProgramInfoButton", KEY_GUIDE_PROGRAM_INFO_BUTTON)
                     put("playerShowChannelInfoCard", KEY_PLAYER_SHOW_CHANNEL_INFO_CARD)
+                    put("programInfoButtonGuide", KEY_PROGRAM_INFO_BUTTON_GUIDE)
+                    put("programInfoButtonList", KEY_PROGRAM_INFO_BUTTON_LIST)
                     put("showRemoteHints", KEY_SHOW_REMOTE_HINTS)
                     put("showEpgBadgesTv", KEY_SHOW_EPG_BADGES_TV)
                     put("showEpgBadgesMobile", KEY_SHOW_EPG_BADGES_MOBILE)
@@ -1736,6 +1834,9 @@ class AppPreferences @Inject constructor(
             if (prefs[KEY_SYNC_REMOTE_CONTROL_MAP] != false) {
                 keys["remoteControlMap"]?.let { prefs[KEY_REMOTE_CONTROL_MAP] = it }
             }
+            if (prefs[KEY_SYNC_RADIO_MODE_BY_DEFAULT] == true) {
+                keys["radioModeByDefault"]?.toBooleanStrictOrNull()?.let { prefs[KEY_RADIO_MODE_BY_DEFAULT] = it }
+            }
             keys["guideGroupSelector"]?.let { prefs[KEY_GUIDE_GROUP_SELECTOR] = it }
             keys["guideSidebarLayout"]?.let { prefs[KEY_GUIDE_SIDEBAR_LAYOUT] = it }
             keys["phoneGroupSelector"]?.let { prefs[KEY_PHONE_GROUP_SELECTOR] = it }
@@ -1744,6 +1845,8 @@ class AppPreferences @Inject constructor(
                 ?.let { prefs[KEY_GUIDE_PROGRAM_INFO_BUTTON] = it }
             keys["playerShowChannelInfoCard"]?.toBooleanStrictOrNull()
                 ?.let { prefs[KEY_PLAYER_SHOW_CHANNEL_INFO_CARD] = it }
+            keys["programInfoButtonGuide"]?.toBooleanStrictOrNull()?.let { prefs[KEY_PROGRAM_INFO_BUTTON_GUIDE] = it }
+            keys["programInfoButtonList"]?.toBooleanStrictOrNull()?.let { prefs[KEY_PROGRAM_INFO_BUTTON_LIST] = it }
             keys["showRemoteHints"]?.toBooleanStrictOrNull()?.let { prefs[KEY_SHOW_REMOTE_HINTS] = it }
             keys["showEpgBadgesTv"]?.toBooleanStrictOrNull()?.let { prefs[KEY_SHOW_EPG_BADGES_TV] = it }
             keys["showEpgBadgesMobile"]?.toBooleanStrictOrNull()?.let { prefs[KEY_SHOW_EPG_BADGES_MOBILE] = it }
@@ -2267,18 +2370,24 @@ class AppPreferences @Inject constructor(
         val KEY_DEBUG_LOGGING_ENABLED = booleanPreferencesKey("debug_logging_enabled")
         val KEY_CAST_FORCE_HEVC_TRANSCODE = booleanPreferencesKey("cast_force_hevc_transcode")
         val KEY_DEVELOPER_FORCE_HLS = booleanPreferencesKey("developer_force_hls")
+        val KEY_SERVER_HLS_HOSTS = androidx.datastore.preferences.core.stringSetPreferencesKey("server_hls_hosts")
         val KEY_CAST_TRANSCODE_DOWN_PROFILE = stringPreferencesKey("cast_transcode_down_profile")
         val KEY_APPLE_TV_CHANNEL_FLIP = booleanPreferencesKey("app_behaviors_apple_tv_channel_flip")
         val KEY_PLAYER_BRIGHTNESS_GESTURE = booleanPreferencesKey("in_player_gesture_brightness")
         val KEY_PLAYER_VOLUME_GESTURE = booleanPreferencesKey("in_player_gesture_volume")
         val KEY_PLAYER_BRIGHTNESS_EDGE = stringPreferencesKey("in_player_gesture_brightness_edge")
         val KEY_REMOTE_CONTROL_MAP = stringPreferencesKey("remote_control_map")
+        val KEY_REMOTE_LEARNED_BUTTONS = stringPreferencesKey("remote_learned_buttons")
         val KEY_SYNC_REMOTE_CONTROL_MAP = booleanPreferencesKey("sync_remote_control_map")
+        val KEY_RADIO_MODE_BY_DEFAULT = booleanPreferencesKey("radio_mode_by_default")
+        val KEY_SYNC_RADIO_MODE_BY_DEFAULT = booleanPreferencesKey("sync_radio_mode_by_default")
         val KEY_GUIDE_GROUP_SELECTOR = stringPreferencesKey("guide_group_selector")
         val KEY_GUIDE_SIDEBAR_LAYOUT = stringPreferencesKey("guide_sidebar_layout")
         val KEY_PHONE_GROUP_SELECTOR = stringPreferencesKey("phone_group_selector")
         val KEY_GUIDE_TUNE_IN_MINI = booleanPreferencesKey("guide_tune_in_mini")
         val KEY_GUIDE_PROGRAM_INFO_BUTTON = stringPreferencesKey("guideProgramInfoButton")
+        val KEY_PROGRAM_INFO_BUTTON_GUIDE = booleanPreferencesKey("programInfoButtonGuide")
+        val KEY_PROGRAM_INFO_BUTTON_LIST = booleanPreferencesKey("programInfoButtonList")
         val KEY_PLAYER_SHOW_CHANNEL_INFO_CARD = booleanPreferencesKey("playerShowChannelInfoCard")
         val KEY_SHOW_REMOTE_HINTS = booleanPreferencesKey("show_remote_hints")
         val KEY_STARTUP_REFRESH_RATE = stringPreferencesKey("startup_refresh_rate")
@@ -2287,6 +2396,7 @@ class AppPreferences @Inject constructor(
         val KEY_SERIES_SORT_ORDER = stringPreferencesKey("series_sort_order")
         val KEY_DVR_SORT_ORDER = stringPreferencesKey("dvr_sort_order")
         val KEY_MATCH_CONTENT_RESOLUTION = booleanPreferencesKey("match_content_resolution")
+        val KEY_MATCH_FRAME_RATE = booleanPreferencesKey("match_frame_rate")
         val KEY_AUTO_RECOVER_FROZEN_STREAMS =
             booleanPreferencesKey("app_behaviors_auto_recover_frozen_streams")
         // Player Info Card element toggles (App Behaviors); device-local.
@@ -2354,6 +2464,8 @@ class AppPreferences @Inject constructor(
         val KEY_MULTIVIEW_LOGO_SIZE = intPreferencesKey("multiview_logo_size")
         val KEY_MULTIVIEW_PERF_WARNING_SUPPRESSED =
             booleanPreferencesKey("multiview_perf_warning_suppressed")
+        val KEY_MULTIVIEW_PICKER_SHOW_SUBTITLES = booleanPreferencesKey("multiview_picker_show_subtitles")
+        val KEY_MULTIVIEW_PICKER_SHOW_DESCRIPTIONS = booleanPreferencesKey("multiview_picker_show_descriptions")
         val KEY_CHANNEL_COLLECTIONS = stringPreferencesKey("channel_collections")
         val KEY_DVR_MAX_LOCAL_STORAGE_MB = intPreferencesKey("dvr_max_local_storage_mb")
         val KEY_DVR_DEFAULT_PRE_ROLL = intPreferencesKey("dvr_default_pre_roll_mins")

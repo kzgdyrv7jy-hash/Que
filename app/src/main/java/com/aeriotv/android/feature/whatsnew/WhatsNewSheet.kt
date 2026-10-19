@@ -295,28 +295,28 @@ object WhatsNewContent {
      *  versionName in build.gradle.kts to surface a new sheet on next launch. */
     val CURRENT = listOf(
         WhatsNewItem(
-            title = "Multiview channel logos",
-            body = "Settings > Player > Multiview can show each tile's channel logo inside the picture, with a corner position and a size from 5 to 25 percent.",
+            title = "Radio channels",
+            body = "Channels Dispatcharr marks as radio start as audio and open Radio Mode. Admins can Mark or Unmark a Radio Channel from the long-press menu.",
         ),
         WhatsNewItem(
-            title = "Reorder a channel's streams",
-            body = "Dispatcharr Direct Connect admins can reorder a channel's streams from Switch Stream: drag the handle on phones and tablets, or use the reorder button on TV.",
+            title = "Radio Mode by Default",
+            body = "A new Player setting opens every channel in Radio Mode. Watch in the long-press menu plays video instead.",
         ),
         WhatsNewItem(
-            title = "Skip Without Controls",
-            body = "A new Player setting: with the controls hidden, Left and Right skip back and forward instead of opening the timeline. Works for live TV, recordings and movies.",
+            title = "Faster audio-only start",
+            body = "Audio-only channels start and join faster, and Dispatcharr HLS output mode no longer fails every tune.",
         ),
         WhatsNewItem(
-            title = "Kept Live and tablets",
-            body = "Closing the player can keep recent channels live for an instant return, shown on a Kept Live card. Tablets use the phone's bottom tab bar.",
+            title = "Android TV",
+            body = "Back twice stops Radio Mode, Back and Hold Back are mappable guide keys, Radio Mode keeps your guide focus, and Multiview from the staging banner keeps tile focus.",
         ),
         WhatsNewItem(
-            title = "Smoother Android TV",
-            body = "Back on DVR, Movies, TV Shows and Settings returns to the tab bar first, focus fixes across the guide and player, and hidden tabs no longer rebuild every 2 seconds.",
+            title = "Exit AerioTV?",
+            body = "Back that would leave the app now asks first on phones, tablets, and TV.",
         ),
         WhatsNewItem(
             title = "Fixes",
-            body = "Fixed a crash when a stream switch followed a 503 retry. Guide colors and drag precision match the Apple app. The guide paints faster at launch.",
+            body = "Radio Mode shows Channel Unavailable and recovers, ended programs inside the lead are not drawn, Dispatcharr re-login is rate limited, and List view Back scrolls to the top.",
         ),
     )
 }

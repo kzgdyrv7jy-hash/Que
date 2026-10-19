@@ -2,6 +2,7 @@ package com.aeriotv.android.ui.settings
 
 import com.aeriotv.android.ui.scale.subtext
 import com.aeriotv.android.ui.theme.textAccent
+import com.aeriotv.android.ui.theme.forText
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -168,7 +169,7 @@ fun SettingsRowDivider(startInset: androidx.compose.ui.unit.Dp = SettingsCardMet
 /** Dim tint used by footers, chevrons and secondary values. */
 @Composable
 fun settingsDimTint(): Color =
-    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f)
+    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f).forText()
 
 /**
  * Uppercase, letter-spaced ACCENT section header above each card (Apple's
@@ -765,7 +766,7 @@ fun SettingsHeaderTextButton(
             )
         }
     } else {
-        androidx.compose.material3.TextButton(onClick = onClick, enabled = enabled) {
+        com.aeriotv.android.ui.AerioTextButton(onClick = onClick, enabled = enabled) {
             Text(label, color = MaterialTheme.colorScheme.textAccent)
         }
     }
@@ -796,6 +797,20 @@ fun Modifier.dpadFocusWash(tint: androidx.compose.ui.graphics.Color = MaterialTh
  * the element's measured size never changes on focus. Place AFTER
  * clip/background, BEFORE clickable.
  */
+/**
+ * Focus treatment for a full-width row that sits in a settings card: the
+ * same shaped fill and 2 dp accent ring [SettingsRowContainer] draws (the
+ * card's radius on TV, first/last-row corners on phones), so a hand-built
+ * row never shows a square wash on a rounded card.
+ */
+@Composable
+fun Modifier.settingsRowFocusCard(): Modifier {
+    var focused by remember { mutableStateOf(false) }
+    return this
+        .onFocusChanged { focused = it.isFocused }
+        .settingsRowCard(focused)
+}
+
 @Composable
 fun Modifier.dpadFocusRing(
     shape: androidx.compose.ui.graphics.Shape,

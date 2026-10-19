@@ -54,7 +54,7 @@ import com.aeriotv.android.ui.scale.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.aeriotv.android.ui.AerioTextButton as TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import com.aeriotv.android.ui.scale.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -127,6 +127,11 @@ fun AddToMultiviewSheet(
     // id instead of appending a new one, and closes on the first pick. Null
     // keeps the original add behaviour, so existing call sites are unchanged.
     swapTargetTileId: String? = null,
+    // Deselect (2026-10-12, Apple parity): a checked row picked again leaves
+    // the set. Over a running Multiview the host removes the tile in place
+    // (MultiviewScreen.removeTileAt, fixed slots) and decides what removing
+    // the sole tile means; null = plain store removal (staging, player flow).
+    onRemoveTile: ((String) -> Unit)? = null,
     multiviewStore: MultiviewStoreHandle = rememberMultiviewStoreHandle(),
     playlistVm: PlaylistViewModel = hiltViewModel(),
     settingsVm: SettingsViewModel = hiltViewModel(),
@@ -162,6 +167,13 @@ fun AddToMultiviewSheet(
     val recentIds by settingsVm.recentChannelIds.collectAsStateWithLifecycle(initialValue = emptyList())
     val selectedIds = selected.map { it.id }.toSet()
     val scope = rememberCoroutineScope()
+    // Settings > Player > Multiview "Show Subtitles" / "Show Descriptions"
+    // (2026-10-12): extra lines on every channel row, read live.
+    val showSubtitles by settingsVm.multiviewPickerShowSubtitles.collectAsStateWithLifecycle(initialValue = false)
+    val showDescriptions by settingsVm.multiviewPickerShowDescriptions.collectAsStateWithLifecycle(initialValue = false)
+    val removeSelected: (String) -> Unit = { id ->
+        onRemoveTile?.invoke(id) ?: multiviewStore.removeTile(id)
+    }
 
     // Source switcher (Phase 2). Channels keeps the existing channel picker;
     // Movies / Series / Recordings draw from the On Demand + DVR view models so
@@ -266,7 +278,10 @@ fun AddToMultiviewSheet(
         ) == Configuration.UI_MODE_TYPE_TELEVISION
     // Tile count gates the Play action: need the seeded current channel PLUS
     // at least one picked channel (>= 2 tiles) for a real multiview grid.
-    val canLaunch = selected.size >= 2
+    // Over a running Multiview (onRemoveTile set) Play only closes the picker
+    // back to the grid, which is valid at any tile count, as on Apple; a new
+    // Multiview from the player still needs two.
+    val canLaunch = if (onRemoveTile != null) selected.isNotEmpty() else selected.size >= 2
 
     // TV: first result when the search has any, else Play when it can launch,
     // else the search toggle (Play is disabled below two tiles and cannot hold
@@ -319,10 +334,11 @@ fun AddToMultiviewSheet(
         return ok
     }
     val commitChannel: (M3UChannel, Boolean) -> Unit = { channel, isSel ->
-        if (swapTargetTileId != null) {
-            commitTile(MultiviewTile.live(channel))
-        } else {
-            gateAdd(!isSel) { multiviewStore.toggle(channel) }
+        when {
+            swapTargetTileId != null -> commitTile(MultiviewTile.live(channel))
+            // Picking a checked row again deselects it (fixed-slot removal).
+            isSel -> removeSelected(channel.id)
+            else -> gateAdd(true) { multiviewStore.toggle(channel) }
         }
     }
     // FORM-FACTOR SPLIT: phones/tablets get the native ModalBottomSheet (with
@@ -389,12 +405,14 @@ fun AddToMultiviewSheet(
                 if (hasSeries) add(PickerSource.Series)
                 if (hasRecordings) add(PickerSource.Recordings)
             }
+            // Pill rows keep start and vertical room inside the LazyRow's
+            // clip, so a selected or focused first pill is never cut at its
+            // left edge (Apple TV showed "Channels" clipped by the inset).
+            val pillRowPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 4.dp)
             if (availableSources.size > 1) {
                 LazyRow(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    contentPadding = PaddingValues(end = 12.dp),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    contentPadding = pillRowPadding,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -495,16 +513,41 @@ fun AddToMultiviewSheet(
                                 },
                         )
                     } else if (groups.size > 1) {
+                        // Guide parity (LiveTvTopBar): the selected pill glides to
+                        // about a third in from the left whenever the selection
+                        // changes or focus leaves the row, so the row never rests
+                        // scrolled with the selected pill past its start. Focus
+                        // entering the row starts on the selected pill.
+                        val groupRowState = androidx.compose.foundation.lazy.rememberLazyListState()
+                        val selectedPillFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+                        var groupRowFocused by remember { mutableStateOf(false) }
+                        androidx.compose.runtime.LaunchedEffect(selectedGroup, groups, groupRowFocused) {
+                            if (groupRowFocused) return@LaunchedEffect
+                            val idx = groups.indexOf(selectedGroup)
+                            if (idx >= 0) {
+                                val viewport = groupRowState.layoutInfo.viewportEndOffset
+                                groupRowState.animateScrollToItem(idx, scrollOffset = -(viewport / 3))
+                            }
+                        }
                         LazyRow(
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(end = 12.dp),
+                            state = groupRowState,
+                            modifier = Modifier
+                                .weight(1f)
+                                .onFocusChanged { groupRowFocused = it.hasFocus }
+                                .focusProperties {
+                                    @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+                                    enter = { selectedPillFocus }
+                                },
+                            // Start and vertical room so a selected or focused
+                            // first pill is not clipped by the row.
+                            contentPadding = PaddingValues(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            items(items = groups, key = { it }) { group ->
+                        ) {                            items(items = groups, key = { it }) { group ->
                                 FilterChip(
                                     selected = group == selectedGroup,
                                     onClick = { selectedGroup = group },
+                                    modifier = if (group == selectedGroup) Modifier.focusRequester(selectedPillFocus) else Modifier,
                                     label = {
                                         Text(
                                             com.aeriotv.android.feature.livetv.groupDisplayName(group),
@@ -563,6 +606,8 @@ fun AddToMultiviewSheet(
                                 ChannelPickerRow(
                                     channel = channel,
                                     nowTitle = now?.title.orEmpty(),
+                                    subtitle = if (showSubtitles) now?.subTitle.orEmpty() else "",
+                                    description = if (showDescriptions) now?.description.orEmpty() else "",
                                     selected = isSel,
                                     atCap = !isSel && atCapNow,
                                     onToggle = { commitChannel(channel, isSel) },
@@ -576,6 +621,8 @@ fun AddToMultiviewSheet(
                             ChannelPickerRow(
                                 channel = channel,
                                 nowTitle = now?.title.orEmpty(),
+                                subtitle = if (showSubtitles) now?.subTitle.orEmpty() else "",
+                                description = if (showDescriptions) now?.description.orEmpty() else "",
                                 selected = isSel,
                                 atCap = !isSel && atCapNow,
                                 onToggle = { commitChannel(channel, isSel) },
@@ -612,7 +659,10 @@ fun AddToMultiviewSheet(
                                 resolving = movieUuid in resolving,
                                 atCap = !isSel && atCapNow,
                                 onPick = {
-                                    if (isSel) return@VodPickerRow
+                                    if (isSel) {
+                                        if (swapTargetTileId == null) removeSelected(tileId)
+                                        return@VodPickerRow
+                                    }
                                     gateAdd(true) {
                                         scope.launch {
                                             resolving = resolving + movieUuid
@@ -703,7 +753,10 @@ fun AddToMultiviewSheet(
                                     resolving = ep.uuid in resolving,
                                     atCap = !isSel && atCapNow,
                                     onPick = {
-                                        if (isSel) return@VodPickerRow
+                                        if (isSel) {
+                                        if (swapTargetTileId == null) removeSelected(tileId)
+                                        return@VodPickerRow
+                                    }
                                         gateAdd(true) {
                                             scope.launch {
                                                 resolving = resolving + ep.uuid
@@ -764,7 +817,10 @@ fun AddToMultiviewSheet(
                                 resolving = false,
                                 atCap = !isSel && atCapNow,
                                 onPick = {
-                                    if (isSel) return@VodPickerRow
+                                    if (isSel) {
+                                        if (swapTargetTileId == null) removeSelected(tileId)
+                                        return@VodPickerRow
+                                    }
                                     gateAdd(true) {
                                         commitTile(
                                             MultiviewTile(
@@ -789,7 +845,14 @@ fun AddToMultiviewSheet(
     // (for the grid "Add streams" path) keep playing; the player flow then
     // relies on its Play button, not BACK, to commit. This is the BackHandler
     // the header comment ("BACK to dismiss") always promised but never wired.
-    BackHandler(onBack = onDismiss)
+    // Back, swipe down and the scrim apply the selection exactly like Play
+    // (Apple TV parity, 2026-10-12); only the explicit Cancel control reverts.
+    // With nothing launchable (fewer than two tiles from the player, or the
+    // Swap Stream picker) they just close and keep what was toggled.
+    val applyAndClose: () -> Unit = {
+        if (swapTargetTileId == null && canLaunch) onLaunch() else onDismiss()
+    }
+    BackHandler(onBack = applyAndClose)
     if (isTvDevice) {
         androidx.compose.runtime.DisposableEffect(Unit) {
             com.aeriotv.android.ui.tv.TvFocusTrace.player("sheet open AddToMultiview")
@@ -800,7 +863,7 @@ fun AddToMultiviewSheet(
         // onDismissRequest KEEPS selections (onDismiss); the "Cancel" text
         // button is the only revert path (onCancel).
         Dialog(
-            onDismissRequest = onDismiss,
+            onDismissRequest = applyAndClose,
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
             // TV: Back that closes the IME never reaches Compose, so watch the IME
@@ -841,7 +904,7 @@ fun AddToMultiviewSheet(
         // Phone / tablet: native bottom sheet. Swipe-to-dismiss KEEPS selections
         // (onDismiss); the "Cancel" text button reverts (onCancel).
         ModalBottomSheet(
-            onDismissRequest = onDismiss,
+            onDismissRequest = applyAndClose,
             sheetState = sheetState,
             containerColor = MaterialTheme.colorScheme.background,
             content = body,
@@ -983,6 +1046,8 @@ private fun ChannelPickerRow(
     channel: M3UChannel,
     nowTitle: String,
     selected: Boolean,
+    subtitle: String = "",
+    description: String = "",
     atCap: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1045,6 +1110,26 @@ private fun ChannelPickerRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.textAccent,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            // Show Subtitles: the program's subtitle line (Teamarr puts
+            // "Team 1 vs Team 2" here). Show Descriptions: two lines max.
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (description.isNotBlank()) {
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall.subtext(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }

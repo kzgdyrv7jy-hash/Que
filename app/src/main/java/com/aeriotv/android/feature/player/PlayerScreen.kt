@@ -579,6 +579,10 @@ fun PlayerScreen(
         // Skipping the prime against a dead player was the silent-black-
         // screen failure: no logs, Stream Info idle, no server client.
         var adoptLive = false
+        // Read before the tune resets it: a failed outgoing channel is
+        // released, never kept live.
+        val previousFailed = exoHolder.streamUnavailable.value ||
+            exoHolder.failedChannelId != null
         if (exoHolder.currentChannelId != channelId || exoHolder.isIdle()) {
             Log.i(TAG, "Channel switch on Exo persistent player -> $url")
             // Trace: this is a real tune entry (channel-list / recents / deep
@@ -645,6 +649,7 @@ fun PlayerScreen(
             timeshiftController.currentPlayUrlProvider = { exoHolder.currentPlayUrl }
             timeshiftController.onFullscreenLiveStarted(
                 channelId, ch.name, url, httpHeaders, logoUrl = ch.tvgLogo, adoptLive = adoptLive,
+                keepPrevious = !previousFailed,
             )
         } else {
             timeshiftController.onFullscreenLiveStopped()
@@ -655,6 +660,13 @@ fun PlayerScreen(
     // Buffered segments stay on disk until the retention reaper runs.
     DisposableEffect(Unit) {
         onDispose {
+            // Radio Mode owns the player now: the Live Rewind buffer keeps
+            // rolling (seekable from the Radio sheet) and the playhead stays
+            // where it is. RadioMode.stop ends it with the full-close rules.
+            if (com.aeriotv.android.feature.player.RadioMode.isActive) {
+                Log.i("AerioTV", "[RADIO] buffer kept on player close")
+                return@onDispose
+            }
             // Adopted kept channel: the buffer's own connection is still
             // live and goes straight back to the kept list; a Go Live here
             // would open a direct connection only to close it.
@@ -663,7 +675,9 @@ fun PlayerScreen(
             // hold-Back stop, PiP X) keeps the channel live like a flip.
             // Minimize to the mini keeps PLAYING it, and multiview launch
             // hands off to tiles, so neither is retained.
-            val toMini = exoWindowState.mode.value == ExoWindowState.Mode.Mini
+            // Radio Mode keeps the holder playing exactly like a minimize.
+            val toMini = exoWindowState.mode.value == ExoWindowState.Mode.Mini ||
+                com.aeriotv.android.feature.player.RadioMode.isActive
             val toMultiview = PlayerCloseIntent.consumeMultiviewLaunch()
             val hlsSession = exoHolder.lastTuneWasForcedHls
             if (hlsSession) Log.i("AerioTV", "[FORCE-HLS] keep live skipped on HLS session")
@@ -674,7 +688,11 @@ fun PlayerScreen(
                     "[RETAIN] not kept on close: " + if (toMini) "minimized to the mini player" else "multiview launch",
                 )
             }
-            timeshiftController.onFullscreenLiveStopped(keepIfEnabled = keepOnClose, toMini = toMini && !hlsSession)
+            timeshiftController.onFullscreenLiveStopped(
+                keepIfEnabled = keepOnClose,
+                toMini = toMini && !hlsSession,
+                streamFailed = exoHolder.streamUnavailable.value || exoHolder.failedChannelId != null,
+            )
         }
     }
 
@@ -969,8 +987,9 @@ fun PlayerScreen(
     // TV keeps the card-only tune-in hint (D-pad flips need the chrome hidden);
     // phones/tablets show the card only with the chrome.
     val pillVisible = if (isTvForm) chromeVisible || launchHintActive else chromeVisible
-    val audioOnlyState = remember { mutableStateOf(false) }
-    var audioOnly by audioOnlyState
+    // The user-facing Audio Only toggle was removed (Radio Mode replaces
+    // it, 2026-10-13); the in-player picture is always on.
+    val audioOnly = false
     val recordTargetState = remember { mutableStateOf<ProgramInfoTarget?>(null) }
     var recordTarget by recordTargetState
     val streamInfoState = remember { mutableStateOf<StreamInfoSnapshot?>(null) }
@@ -1296,8 +1315,8 @@ fun PlayerScreen(
     val unavailableRetrySerialState = remember(currentChannel?.id) { mutableIntStateOf(0) }
     var unavailableRetrySerial by unavailableRetrySerialState
 
-    // Returning to the foreground player must always restore video unless the
-    // user explicitly chose Audio Only. A media-session controller (or the old
+    // Returning to the foreground player must always restore video unless
+    // Radio Mode owns the player. A media-session controller (or the old
     // car-audio path) could have disabled the video track while we were
     // backgrounded; without this the user came back to a black screen with
     // sound and the Audio Only toggle's state did not match the real track
@@ -1306,9 +1325,8 @@ fun PlayerScreen(
     DisposableEffect(lifecycleOwner, audioOnly) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                // A companion remote's Audio Only is an equally explicit user
-                // choice -- the resume restore must not clobber it (GH #33).
-                exoHolder.setVideoTrackEnabled(!(audioOnly || exoHolder.remoteAudioOnly))
+                // Radio Mode is the only owner of a video-off state now.
+                exoHolder.setVideoTrackEnabled(!exoHolder.radioVideoOff)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -1969,7 +1987,6 @@ fun PlayerScreen(
             multiviewPickerOpenState = multiviewPickerOpenState,
             chromeMenuOpenState = chromeMenuOpenState,
             castChooserOpenState = castChooserOpenState,
-            audioOnlyState = audioOnlyState,
             sleepEndsAtState = sleepEndsAtState,
             sleepRemainingMillisState = sleepRemainingMillisState,
             commitScrubCatchup = commitScrubCatchup,
@@ -2773,7 +2790,6 @@ private fun LiveRewindChromeSection(
     multiviewPickerOpenState: MutableState<Boolean>,
     chromeMenuOpenState: MutableState<Boolean>,
     castChooserOpenState: MutableState<Boolean>,
-    audioOnlyState: MutableState<Boolean>,
     sleepEndsAtState: MutableState<Long?>,
     sleepRemainingMillisState: MutableState<Long?>,
     commitScrubCatchup: (Long) -> Unit,
@@ -2824,7 +2840,6 @@ private fun LiveRewindChromeSection(
     var multiviewPickerOpen by multiviewPickerOpenState
     var chromeMenuOpen by chromeMenuOpenState
     var castChooserOpen by castChooserOpenState
-    var audioOnly by audioOnlyState
     var sleepEndsAt by sleepEndsAtState
     var sleepRemainingMillis by sleepRemainingMillisState
     // Live Rewind: the ticker that keeps the buffer window and
@@ -3101,26 +3116,15 @@ private fun LiveRewindChromeSection(
         },
         videoScaleLabel = videoScaleLabel(videoScaleMode),
         onCycleVideoScale = { settingsVm.cycleVideoScaleMode(videoScaleMode) },
-        onToggleAudioOnly = {
-            audioOnly = !audioOnly
-            val player = exoHolder.player
-            if (audioOnly) {
-                // Disable the video track on the current selection.
-                // The audio renderer keeps running -- this is the
-                // Media3 equivalent of libmpv `vid=no` without the
-                // need to reload the stream when toggling back.
-                player?.trackSelectionParameters = player?.trackSelectionParameters
-                    ?.buildUpon()
-                    ?.setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_VIDEO, true)
-                    ?.build() ?: return@PlayerChromeOverlay
-            } else {
-                player?.trackSelectionParameters = player?.trackSelectionParameters
-                    ?.buildUpon()
-                    ?.setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_VIDEO, false)
-                    ?.build() ?: return@PlayerChromeOverlay
+        // Radio Mode (Android#127): keep this channel's audio, drop to the
+        // Live TV tab with the Radio card. Hidden while casting or remote.
+        onRadioMode = if (castSender.state.value is com.aeriotv.android.core.cast.AerioCastSender.State.Connected || isCatchupMode || currentChannel == null) null else ({
+            currentChannel?.let { ch ->
+                com.aeriotv.android.feature.player.RadioMode.start(context, ch)
+                miniPlayerVm.dismiss()
+                onClose()
             }
-        },
-        audioOnly = audioOnly,
+        }),
         onSetSleepMinutes = { minutes ->
             sleepEndsAt = if (minutes == 0) null else System.currentTimeMillis() + minutes * 60_000L
         },

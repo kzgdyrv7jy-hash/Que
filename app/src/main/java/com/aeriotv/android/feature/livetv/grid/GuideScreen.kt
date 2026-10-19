@@ -1,12 +1,16 @@
 package com.aeriotv.android.feature.livetv.grid
 
+import com.aeriotv.android.core.pip.findActivity
+import com.aeriotv.android.core.data.guideMatchKey
 import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
@@ -23,6 +27,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.CalendarMonth
@@ -37,7 +42,6 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.FiberManualRecord
 import androidx.compose.material.icons.outlined.CreateNewFolder
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -56,6 +60,7 @@ import com.aeriotv.android.feature.livetv.TvGroupPicker
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -83,7 +88,9 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aeriotv.android.core.data.ChannelCollection
 import com.aeriotv.android.core.data.EPGProgramme
@@ -119,6 +126,10 @@ import com.aeriotv.android.feature.playlist.PlaylistViewModel
 import com.aeriotv.android.feature.reminders.RemindersViewModel
 import com.aeriotv.android.feature.settings.SettingsViewModel
 import com.aeriotv.android.ui.LocalCanRecordToServer
+import com.aeriotv.android.ui.theme.isQueTheme
+import com.aeriotv.android.ui.theme.RoyalBlueFocus
+import com.aeriotv.android.ui.theme.RoyalBlueRaised
+import com.aeriotv.android.ui.theme.RoyalBlueSurface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -182,6 +193,7 @@ fun GuideScreen(
         out as Map<Int, List<LongRange>>
     }
     val isTv = rememberLiveTvFormFactor().isTv
+    val queGuide = isTv && isQueTheme()
     val context = LocalContext.current
     val canRecordToServer = LocalCanRecordToServer.current
 
@@ -197,8 +209,12 @@ fun GuideScreen(
     // the pref folds into the hidden set the sheets and the filters see.
     val recentGroupVisible by settingsVm.recentGroupVisible.collectAsStateWithLifecycle()
     val recentChannelIds by settingsVm.recentChannelIds.collectAsStateWithLifecycle(initialValue = emptyList())
-    val programInfoButtonMode by settingsVm.guideProgramInfoButton
+    val programInfoButtonModeRaw by settingsVm.guideProgramInfoButton
         .collectAsStateWithLifecycle(initialValue = com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF)
+    val programInfoButtonGuideOn by settingsVm.programInfoButtonGuide.collectAsStateWithLifecycle(initialValue = false)
+    // Program Info Button > Guide View off hides the button in the guide.
+    val programInfoButtonMode = if (programInfoButtonGuideOn) programInfoButtonModeRaw
+        else com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF
     val effectiveHidden = remember(hiddenGroups, recentGroupVisible) {
         if (recentGroupVisible) hiddenGroups
         else hiddenGroups + com.aeriotv.android.feature.playlist.PlaylistViewModel.RECENT_GROUP
@@ -213,7 +229,7 @@ fun GuideScreen(
     val stagingOn by multiviewStore.isStaging.collectAsStateWithLifecycle()
     val mvPlayingSeed by multiviewStore.playingSeed.collectAsStateWithLifecycle()
     val groupSelector by settingsVm.guideGroupSelector.collectAsStateWithLifecycle()
-    val sidebarGroupMode = isTv && groupSelector == "sidebar" && !favoritesOnly
+    val sidebarGroupMode = isTv && !queGuide && groupSelector == "sidebar" && !favoritesOnly
     // Sidebar layout (Logan 2026-09-14): "shift" docks the pane beside the
     // grid, which narrows instead of being covered; "overlay" keeps the scrim.
     val guideSidebarLayout by settingsVm.guideSidebarLayout.collectAsStateWithLifecycle()
@@ -247,8 +263,8 @@ fun GuideScreen(
     // Phone / tablet rows keep their fixed canon heights at 100% and grow only
     // with the app Text Size (not the system font size, unchanged from before).
     val appTextScale = com.aeriotv.android.ui.scale.LocalAppTextScale.current
-    val hourWidth = if (isTv) 300.dp * guideScale * tvComfortScale else 320.dp * guideScale
-    val railWidth = if (isTv) 120.dp * tvComfortScale else 78.dp
+    val hourWidth = if (queGuide) 300.dp else if (isTv) 300.dp * guideScale * tvComfortScale else 320.dp * guideScale
+    val railWidth = if (queGuide) 188.dp else if (isTv) 120.dp * tvComfortScale else 78.dp
     // Phone cells carry the subtitle and two description lines (Logan
     // 2026-09-05, EPGGuideView.swift:3415: 98pt on the phone idiom, 72 on
     // the iPad), so they are taller. Phone = smallest width under 600dp,
@@ -258,7 +274,7 @@ fun GuideScreen(
     // above the guide carries the focused program; rows keep title + tags
     // and are shorter (tvOS 96 vs 110 pt).
     val liveTvLayout by settingsVm.liveTvLayout.collectAsStateWithLifecycle()
-    val previewMode = isTv && liveTvLayout == "preview"
+    val previewMode = isTv && (queGuide || liveTvLayout == "preview")
     // Subtext Size grows rows only (never shrinks them) by the share of the
     // row that holds secondary lines (subtitle, description, time).
     val subtextGrowth = com.aeriotv.android.ui.scale.LocalSubtextScale.current.let { s ->
@@ -283,9 +299,9 @@ fun GuideScreen(
     // more of it), so the row count, not the row height, is what has to match.
     // The phone / tablet column still takes its small net growth: there the
     // band replaces a number line that used to sit under the logo.
-    val rowHeight = (if (isTv) (if (previewMode) 48.dp else 66.dp) * tvComfortScale * fontScale else if (isPhoneIdiom) 98.dp * appTextScale else 72.dp * appTextScale) * subtextGrowth +
+    val rowHeight = if (queGuide) 66.dp else (if (isTv) (if (previewMode) 48.dp else 66.dp) * tvComfortScale * fontScale else if (isPhoneIdiom) 98.dp * appTextScale else 72.dp * appTextScale) * subtextGrowth +
         (if (isTv) 0.dp else com.aeriotv.android.feature.livetv.grid.GUIDE_PHONE_ROW_BAND_GROWTH)
-    val headerHeight = if (isTv) 25.dp * tvComfortScale * fontScale else 32.dp * appTextScale
+    val headerHeight = if (queGuide) 32.dp else if (isTv) 25.dp * tvComfortScale * fontScale else 32.dp * appTextScale
 
     // Clock: 30 s tick for the now-line and the airing tint.
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -525,6 +541,31 @@ fun GuideScreen(
                 ),
             ) { GuideGridRows(displayChannels, state.epgByChannel as? GuideCatalog, windowStartMs, windowEndMs) }
         }
+    }
+    // Streamer empty-guide-at-launch diagnosis: once per process, state at
+    // the first non-empty row install (catalog, coverage of now, window).
+    LaunchedEffect(rows) {
+        if (rows.isEmpty) return@LaunchedEffect
+        val cat = state.epgByChannel
+        // Two one-shot lines: the first row install (may precede the cached
+        // catalog by about 1.5 s on the Streamer) and the first with programs.
+        val label = when {
+            RetainedGuideGrid.markFirstPaintLogged() -> "first paint"
+            cat is GuideCatalog && RetainedGuideGrid.markFirstCatalogPaintLogged() -> "first paint with programs"
+            else -> return@LaunchedEffect
+        }
+        val now = System.currentTimeMillis()
+        val withNow = rows.channels.count { ch ->
+            cat[ch.guideMatchKey]?.any { now >= it.startMillis && now < it.endMillis } == true
+        }
+        android.util.Log.i(
+            "AerioTV",
+            "[GUIDE] $label: catalog=${if (cat is GuideCatalog) "built" else "none"} " +
+                "catalogChannels=${cat.size} rows=${rows.size} rowsWithNow=$withNow " +
+                "windowStart=${rows.windowStartMs} windowEnd=${rows.windowEndMs} " +
+                "viewportStart=${grid.viewportStartMs} now=$now " +
+                "windowCoversNow=${now >= rows.windowStartMs && now < rows.windowEndMs}",
+        )
     }
     LaunchedEffect(rows) {
         // Same rows object as the retained state already holds: the install
@@ -806,8 +847,16 @@ fun GuideScreen(
     // focus is outside the guide AND outside the nav, i.e. genuinely nowhere,
     // and only while no overlay is up, so this never fights the single-owner
     // model or pulls focus off chrome that legitimately has it.
+    // GH #138: the route must also be RESUMED. Play on the staging banner
+    // navigates to Multiview and the banner leaves with focus on it; while
+    // MAIN is still composed for the exit transition (STARTED, no longer
+    // RESUMED) this watchdog used to fire, pull focus back to a guide cell
+    // and strand it on "none" when MAIN left, stealing it from the
+    // Multiview grid host so no key reached the tiles.
+    val guideResumed by androidx.compose.runtime.produceState(guideLifecycle.currentState, guideLifecycle) { guideLifecycle.currentStateFlow.collect { value = it } }
     if (isTv) {
-        val stranded = tabActive && !rows.isEmpty && !guideHasFocus && !topNavHasFocus.value &&
+        val stranded = guideResumed.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED) &&
+            tabActive && !rows.isEmpty && !guideHasFocus && !topNavHasFocus.value &&
             !groupSidebarOpen && !showManageGroups && !showJumpSheet && !searchActive &&
             menuFor == null && programInfoTarget == null && recordTarget == null && collectionPickerFor == null
         LaunchedEffect(stranded) {
@@ -817,6 +866,10 @@ fun GuideScreen(
             delay(350L)
             while (com.aeriotv.android.ui.tv.TvColdStartFocus.pending) delay(50L)
             if (guideHasFocus || topNavHasFocus.value) return@LaunchedEffect
+            if (!guideLifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                com.aeriotv.android.ui.tv.TvFocusTrace.guide("refocus skipped=not-resumed state=${guideLifecycle.currentState}")
+                return@LaunchedEffect
+            }
             val ok = runCatching { gridFocus.requestFocus() }.getOrDefault(false)
             com.aeriotv.android.ui.tv.TvFocusTrace.guide("refocus after=stranded result=$ok ${traceGates()}")
         }
@@ -931,8 +984,20 @@ fun GuideScreen(
     val hostAction: (com.aeriotv.android.core.remote.GuideRemoteAction) -> Boolean = { action ->
         when (action) {
             com.aeriotv.android.core.remote.GuideRemoteAction.FOCUS_GROUP_PILLS -> openGroupMenu()
-            com.aeriotv.android.core.remote.GuideRemoteAction.RESUME_PLAYER -> { if (miniActive) miniPlayerVm.session.requestResume(); true }
-            com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER -> { if (miniActive) miniPlayerVm.session.dismiss(); true }
+            com.aeriotv.android.core.remote.GuideRemoteAction.RESUME_PLAYER -> {
+                // A Multiview left with Back to Guide: Play/Pause returns to it.
+                if (isTv && com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null) onLaunchMultiview()
+                else if (miniActive) miniPlayerVm.session.requestResume()
+                true
+            }
+            com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER -> {
+                // Same close (and keep-live decision) as hold-Right in MainActivity.
+                if (miniActive) {
+                    (context as? com.aeriotv.android.MainActivity)?.closeTvMini("guide-action")
+                        ?: miniPlayerVm.session.dismiss()
+                }
+                true
+            }
             com.aeriotv.android.core.remote.GuideRemoteAction.PROGRAM_INFO -> {
                 val row = grid.focusRow; val cell = grid.focusedCell()
                 if (row >= 0 && cell != null && !cell.isPlaceholder) {
@@ -1013,6 +1078,27 @@ fun GuideScreen(
         // belongs to the previous playlist and must not be put back.
         if (groupSidebarOpen) { sidebarOriginalGroup = null; groupSidebarOpen = false }
     }
+    // Android#137: double Back on the TV mini emits guideTopRequests
+    // (Navigation.kt TvMiniPlayerOverlay onJumpToTop), but the guide rebuild
+    // (fd886fab) dropped the only collector, so the request went nowhere in
+    // every Play Channels In mode. Land now + the top channel; the mini keeps
+    // playing.
+    val tuneModeVm: com.aeriotv.android.feature.settings.SettingsViewModel = hiltViewModel()
+    val tuneInMiniMode by tuneModeVm.guideTuneInMini.collectAsStateWithLifecycle(initialValue = false)
+    val tabActiveNow by androidx.compose.runtime.rememberUpdatedState(tabActive)
+    val miniActiveNow by androidx.compose.runtime.rememberUpdatedState(miniActive)
+    LaunchedEffect(miniPlayerVm.session) {
+        miniPlayerVm.session.guideTopRequests.collect {
+            if (!tabActiveNow) return@collect
+            android.util.Log.i(
+                "AerioTV",
+                "[GUIDE] double Back -> top channel (window=${if (miniActiveNow) "mini" else "fullscreen"} tuneIn=${if (tuneInMiniMode) "mini" else "fullscreen"})",
+            )
+            grid.back(System.currentTimeMillis())
+            runCatching { gridListState.scrollToItem(0) }
+            runCatching { gridFocus.requestFocus() }
+        }
+    }
     BackHandler(enabled = tabActive && groupSidebarOpen) {
         restoreSidebarGroup()
         sidebarOriginalGroup = null
@@ -1020,18 +1106,157 @@ fun GuideScreen(
         runCatching { gridFocus.requestFocus() }
     }
 
-    // With a mini player up, Back belongs to the player host (expand / close),
-    // exactly as the old guide: the ladder must never finish the Activity
-    // while a stream is playing.
-    BackHandler(enabled = tabActive && !miniActive && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null) {
+    // With a mini player up on TV, Back belongs to the player host
+    // (TvMiniPlayerOverlay: expand / double-Back to top), exactly as the old
+    // guide. Phone and tablet have no mini Back host, so the ladder stays
+    // installed there: a Back after the player minimized fell through to the
+    // Activity and closed AerioTV (onn tablet 2026-10-14, audio-only mini).
+    val uiModeTv = (androidx.compose.ui.platform.LocalConfiguration.current.uiMode and
+        android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
+        android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+    // Radio Mode double Back (Logan 2026-10-14, Apple TV parity): on TV a
+    // second Back inside PlayerDoubleBack.WINDOW_MS stops Radio Mode, as
+    // Back twice closes the full-screen player. As on tvOS, the first Back
+    // only opens the window: its single-Back action (jump to the top channel,
+    // or Exit AerioTV? at the top) runs when the window lapses, so a Back
+    // twice leaves the guide focus where it was. Outside Radio Mode the
+    // ladder runs at once, as before.
+    val radioBackScope = androidx.compose.runtime.rememberCoroutineScope()
+    val radioPendingBack = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
+    // Radio stop focus restore (Apple TV parity, Streamer 2026-10-15): the
+    // cell focused when Radio Mode started or at a stop trigger's press-down
+    // (double Back, hold Right, banner Stop) gets focus back after the stop,
+    // instead of focus falling to Search when the banner leaves.
+    val radioFocusAnchor = remember { arrayOfNulls<Pair<String, Long>>(1) }
+    val radioCaptureFocus: () -> Unit = {
+        val row = grid.focusRow
+        if (row in 0 until grid.rows.size) {
+            radioFocusAnchor[0] = grid.rows.channel(row).id to grid.focusCellStartMs
+        }
+    }
+    val radioSessionNow by com.aeriotv.android.feature.player.RadioMode.state.collectAsStateWithLifecycle()
+    // Origin cell at Radio Mode start: banner Stop restores here (tvOS
+    // parity 2026-10-15); presses on the way to the banner never move it.
+    val radioOriginAnchor = remember { arrayOfNulls<Pair<String, Long>>(1) }
+    LaunchedEffect(radioSessionNow != null) {
+        if (radioSessionNow != null && isTv) {
+            radioCaptureFocus()
+            radioOriginAnchor[0] = radioFocusAnchor[0]
+        }
+    }
+    DisposableEffect(Unit) {
+        com.aeriotv.android.feature.player.RadioMode.captureGuideFocus = { radioCaptureFocus() }
+        onDispose { com.aeriotv.android.feature.player.RadioMode.captureGuideFocus = null }
+    }
+    LaunchedEffect(Unit) {
+        com.aeriotv.android.feature.player.RadioMode.stops.collect { reason ->
+            if (!isTv || !tabActive) return@collect
+            if (reason != "double Back" && reason != "hold-right" && reason != "card") return@collect
+            val anchor = if (reason == "card") radioOriginAnchor[0] ?: radioFocusAnchor[0] else radioFocusAnchor[0]
+            radioFocusAnchor[0] = null
+            radioOriginAnchor[0] = null
+            if (grid.rows.size == 0) return@collect
+            val row = anchor?.let { grid.rows.indexOfChannel(it.first) } ?: -1
+            val how: String
+            if (row >= 0) {
+                val cell = grid.rows.cellAt(row, anchor!!.second)
+                if (cell != null && cell.startMillis == anchor.second) {
+                    grid.focusRowAt(row, anchor.second)
+                    how = "cell"
+                } else {
+                    grid.focusRowAt(row, grid.rows.cellAt(row, System.currentTimeMillis())?.startMillis)
+                    how = "airing"
+                }
+            } else {
+                grid.focusRowAt(0, grid.rows.cellAt(0, System.currentTimeMillis())?.startMillis)
+                how = "top"
+            }
+            // Hold grid focus while the banner leaves and its focus falls.
+            var held = 0
+            var attempts = 0
+            while (attempts < 20 && held < 6) {
+                if (gridHasFocus) held++ else { held = 0; runCatching { gridFocus.requestFocus() } }
+                attempts++
+                delay(100L)
+            }
+            android.util.Log.i(com.aeriotv.android.ui.tv.TvFocusTrace.TAG, "[FOCUS] radio stop restore -> ${guideTraceCell(grid)} via=$how reason=$reason result=${if (gridHasFocus) "success" else "failure"} attempts=$attempts")
+        }
+    }
+    val runGuideBackLadder: () -> Unit = {
         when (grid.back(nowMs)) {
             GuideGridState.BackStep.RESTORED_NOW_AND_TOP, GuideGridState.BackStep.TOP -> Unit
             GuideGridState.BackStep.NONE -> {
-                // Logan 2026-09-01: Back at the top of the guide must never close
-                // the app. At now and the top row it is a consumed no-op and the
-                // group stays as picked, matching Apple TV's Menu (now + top only).
+                // Logan 2026-09-01: Back at the top of the guide never closes
+                // the app silently; the group stays as picked. Since 2026-10-14
+                // the end of the ladder raises the Exit AerioTV? confirm (the
+                // same one the Activity's root Back fallback shows).
+                (context.findActivity() as? com.aeriotv.android.MainActivity)
+                    ?.requestExitPrompt("guide-top")
             }
         }
+    }
+    // Remote Control map, guide Back (Logan 2026-10-15): on TV a single Back
+    // runs the guide map's backShort slot (default BACK_LADDER, the ladder
+    // above). Phone and tablet keep the ladder; their Back is not a remote.
+    val gridRunner = remember { arrayOfNulls<(com.aeriotv.android.core.remote.GuideRemoteAction) -> Boolean>(1) }
+    val runGuideMapped: (com.aeriotv.android.core.remote.GuideRemoteAction, String) -> Unit = { action, press ->
+        android.util.Log.i("AerioTV", "[GUIDE] $press Back -> ${action.wire}")
+        when (action) {
+            com.aeriotv.android.core.remote.GuideRemoteAction.BACK_LADDER -> runGuideBackLadder()
+            com.aeriotv.android.core.remote.GuideRemoteAction.NONE -> Unit
+            else -> { (gridRunner[0] ?: hostAction)(action) }
+        }
+    }
+    val runMappedBack: () -> Unit = {
+        if (uiModeTv) {
+            runGuideMapped(remoteMap.guideAction(com.aeriotv.android.core.remote.RemoteSlot.BACK_SHORT, sidebarGroupMode), "single")
+        } else {
+            runGuideBackLadder()
+        }
+    }
+    val guideBackEnabled = tabActive && !(miniActive && uiModeTv) && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null
+    BackHandler(enabled = guideBackEnabled) {
+        if (miniActive) android.util.Log.i("AerioTV", "[GUIDE] Back with mini up (touch): guide ladder, app stays open")
+        if (miniPlayerVm.session.expandInFlight()) {
+            android.util.Log.i("AerioTV", "[GUIDE] Back ignored: mini expand in flight")
+            return@BackHandler
+        }
+        val pending = radioPendingBack[0]
+        if (pending != null && pending.isActive) {
+            // Second Back inside the window: drop the deferred single Back.
+            pending.cancel()
+            radioPendingBack[0] = null
+            if (com.aeriotv.android.feature.player.RadioMode.isActive) {
+                com.aeriotv.android.feature.player.RadioMode.stop(context, "double Back")
+            }
+            return@BackHandler
+        }
+        val radioTv = uiModeTv && com.aeriotv.android.feature.player.RadioMode.isActive
+        if (radioTv) {
+            // First Back of a possible double: anchor the cell at press-down.
+            radioCaptureFocus()
+            radioPendingBack[0] = radioBackScope.launch {
+                kotlinx.coroutines.delay(com.aeriotv.android.feature.player.PlayerDoubleBack.WINDOW_MS)
+                radioPendingBack[0] = null
+                runMappedBack()
+            }
+        } else {
+            runMappedBack()
+        }
+    }
+    // Hold Back (guide map backLong, Logan 2026-10-15). Registered with the
+    // Activity only while this guide owns Back on TV and the slot is mapped;
+    // MainActivity then runs it on a hold released before the exit-prompt
+    // hold (EXIT_PROMPT_HOLD_MS), and a longer hold still raises Exit AerioTV?.
+    val backLongAction = remoteMap.guideAction(com.aeriotv.android.core.remote.RemoteSlot.BACK_LONG, sidebarGroupMode)
+    val holdBackOwned = uiModeTv && guideBackEnabled &&
+        backLongAction != com.aeriotv.android.core.remote.GuideRemoteAction.NONE
+    val latestBackLong = androidx.compose.runtime.rememberUpdatedState(backLongAction)
+    androidx.compose.runtime.DisposableEffect(holdBackOwned) {
+        val activity = context.findActivity() as? com.aeriotv.android.MainActivity
+        val hook: () -> Unit = { runGuideMapped(latestBackLong.value, "hold") }
+        if (holdBackOwned) activity?.guideHoldBackAction = hook
+        onDispose { if (activity?.guideHoldBackAction === hook) activity.guideHoldBackAction = null }
     }
 
     // Phone drawer rows: collections where their pill placement puts them,
@@ -1117,60 +1342,75 @@ fun GuideScreen(
                 )
             }
         }
-        if (previewMode) {
-            val topNav = com.aeriotv.android.feature.main.LocalTvTopNavFocusRequester.current
-            val pillsShown = !sidebarGroupMode && !favoritesOnly
-            GuidePreviewBanner(
-                program = previewProgram,
-                channel = previewChannel,
-                nowMs = nowMs,
-                onOpenInfo = {
-                    previewProgram?.let { cell ->
-                        programInfoTarget = cell.toInfoTarget(previewChannel?.name ?: "", previewChannel?.dispatcharrChannelId)
-                    }
+        val previewBanner: @Composable () -> Unit = {
+            if (previewMode) {
+                val topNav = com.aeriotv.android.feature.main.LocalTvTopNavFocusRequester.current
+                val pillsShown = !sidebarGroupMode && !favoritesOnly
+                GuidePreviewBanner(
+                    program = previewProgram,
+                    channel = previewChannel,
+                    nowMs = nowMs,
+                    onOpenInfo = {
+                        previewProgram?.let { cell ->
+                            programInfoTarget = cell.toInfoTarget(previewChannel?.name ?: "", previewChannel?.dispatcharrChannelId)
+                        }
+                    },
+                    descriptionFocus = bannerFocus,
+                    downTarget = if (queGuide) gridFocus else if (pillsShown) pillsFocus else gridFocus,
+                    upTarget = if (queGuide && pillsShown) pillsFocus else topNav,
+                    // tvOS: Down from the description lands on the clock when
+                    // there is no pill row between them.
+                    onDown = if (!queGuide && pillsShown) null else ({ clockSelectTrigger += 1; true }),
+                    miniActive = miniActive,
+                    // tvOS pulls the banner 28 pt up under the tab bar so eight
+                    // rows still fit (ChannelListView, Logan 2026-09-05); halved.
+                    modifier = if (queGuide) Modifier else Modifier.layout { measurable, constraints ->
+                        val lift = GuidePreviewBanner.tvLift.roundToPx()
+                        val placeable = measurable.measure(constraints)
+                        layout(placeable.width, (placeable.height - lift).coerceAtLeast(0)) { placeable.placeRelative(0, -lift) }
+                    },
+                )
+            }
+        }
+        val groupPills: @Composable () -> Unit = {
+            val pillsContext = androidx.compose.ui.platform.LocalContext.current
+            if (isTv && !sidebarGroupMode && !favoritesOnly) GroupPills(
+                onManageGroups = { showManageGroups = true },
+                hiddenGroupCount = hiddenGroups.size,
+                defaultToken = defaultGroupToken,
+                onSetDefault = { token ->
+                    // Brief confirmation (Logan 2026-10-10); the pin on the pill
+                    // is the lasting mark. Same toggle as the sidebar rows:
+                    // holding the current default clears it.
+                    val clearing = token == defaultGroupToken
+                    val label = pillItems.firstOrNull { it.first == token }?.second ?: token
+                    com.aeriotv.android.ui.tv.TvFocusTrace.guide("default group ${if (clearing) "cleared" else "set"} token=$token")
+                    android.widget.Toast.makeText(
+                        pillsContext,
+                        if (clearing) "Default group cleared" else "Live TV opens on $label",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                    viewModel.setDefaultGroup(token)
                 },
-                descriptionFocus = bannerFocus,
-                downTarget = if (pillsShown) pillsFocus else gridFocus,
-                upTarget = topNav,
-                // tvOS: Down from the description lands on the clock when
-                // there is no pill row between them.
-                onDown = if (pillsShown) null else ({ clockSelectTrigger += 1; true }),
-                miniActive = miniActive,
-                // tvOS pulls the banner 28 pt up under the tab bar so eight
-                // rows still fit (ChannelListView, Logan 2026-09-05); halved.
-                modifier = Modifier.layout { measurable, constraints ->
-                    val lift = GuidePreviewBanner.tvLift.roundToPx()
-                    val placeable = measurable.measure(constraints)
-                    layout(placeable.width, (placeable.height - lift).coerceAtLeast(0)) { placeable.placeRelative(0, -lift) }
+                items = pillItems,
+                selected = state.selectedGroup,
+                onSelect = { viewModel.onGroupSelected(it) },
+                rowFocus = pillsFocus,
+                onDown = {
+                    val target = if (queGuide && previewProgram?.description?.isNotBlank() == true) bannerFocus else gridFocus
+                    runCatching { target.requestFocus() }.getOrDefault(false)
                 },
+                leadInset = if (queGuide) 16.dp else railWidth,
+                queStyle = queGuide,
             )
         }
-        val pillsContext = androidx.compose.ui.platform.LocalContext.current
-        if (isTv && !sidebarGroupMode && !favoritesOnly) GroupPills(
-            onManageGroups = { showManageGroups = true },
-            hiddenGroupCount = hiddenGroups.size,
-            defaultToken = defaultGroupToken,
-            onSetDefault = { token ->
-                // Brief confirmation (Logan 2026-10-10); the pin on the pill
-                // is the lasting mark. Same toggle as the sidebar rows:
-                // holding the current default clears it.
-                val clearing = token == defaultGroupToken
-                val label = pillItems.firstOrNull { it.first == token }?.second ?: token
-                com.aeriotv.android.ui.tv.TvFocusTrace.guide("default group ${if (clearing) "cleared" else "set"} token=$token")
-                android.widget.Toast.makeText(
-                    pillsContext,
-                    if (clearing) "Default group cleared" else "Live TV opens on $label",
-                    android.widget.Toast.LENGTH_SHORT,
-                ).show()
-                viewModel.setDefaultGroup(token)
-            },
-            items = pillItems,
-            selected = state.selectedGroup,
-            onSelect = { viewModel.onGroupSelected(it) },
-            rowFocus = pillsFocus,
-            onDown = { runCatching { gridFocus.requestFocus() }.getOrDefault(false) },
-            leadInset = railWidth,
-        )
+        if (queGuide) {
+            groupPills()
+            previewBanner()
+        } else {
+            previewBanner()
+            groupPills()
+        }
         // Multiview staging banner (iOS EPGGuideView.stagingBanner), shared
         // with the List, below the header / pills and above the grid (iOS
         // placement); restored after the guide rebuild dropped it.
@@ -1185,6 +1425,12 @@ fun GuideScreen(
             playFocusRequester = stagingPlayFocus,
             upTarget = if (!sidebarGroupMode && !favoritesOnly && pillItems.isNotEmpty()) pillsFocus else null,
             downTarget = gridFocus,
+            // Radio start keeps focus on the chosen cell (Logan 2026-10-15).
+            radioKeepFocus = {
+                val held = gridHasFocus ||
+                    runCatching { gridFocus.requestFocus() }.getOrDefault(false)
+                android.util.Log.d(com.aeriotv.android.ui.tv.TvFocusTrace.TAG, "[FOCUS] radio start keep -> ${guideTraceCell(grid)} result=${if (held) "success" else "failure"}")
+            },
         )
         // Channel Preview OFF + corner mini Active: the mini has no banner art
         // card to share a baseline with, so it gets its OWN slot here -- a
@@ -1281,13 +1527,17 @@ fun GuideScreen(
                 // requester landed on the leftmost pill and, with
                 // selection-follows-focus, switched to Live TV.
                 onLeaveTop = {
-                    val stagingUp = isTv && stagingOn && stagedMultiview.isNotEmpty() &&
+                    // The background Multiview banner shares the Play slot.
+                    val bannerUp = (stagingOn && stagedMultiview.isNotEmpty()) ||
+                        com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null ||
+                        com.aeriotv.android.feature.player.RadioMode.isActive
+                    val stagingUp = isTv && bannerUp &&
                         runCatching { stagingPlayFocus.requestFocus() }.getOrDefault(false)
                     com.aeriotv.android.ui.tv.TvFocusTrace.guide("leave-top staging-banner=$stagingUp")
                     if (stagingUp) true else when {
                         // Channel Preview with no pill row: the banner's
                         // description is the next stop above the clock.
-                        previewMode && (favoritesOnly || sidebarGroupMode) && previewProgram?.description?.isNotBlank() == true ->
+                        previewMode && (queGuide || favoritesOnly || sidebarGroupMode) && previewProgram?.description?.isNotBlank() == true ->
                             runCatching { bannerFocus.requestFocus() }.getOrDefault(false)
                         favoritesOnly -> guideFocusManager.moveFocus(androidx.compose.ui.focus.FocusDirection.Up)
                         sidebarGroupMode -> false
@@ -1303,6 +1553,7 @@ fun GuideScreen(
                 },
                 remoteAction = { slot -> remoteMap.guideAction(slot, sidebarGroupMode) },
                 onHostAction = hostAction,
+                onActionRunner = { gridRunner[0] = it },
                 focusRequester = gridFocus,
                 // Shift guide: the docked pane owns focus; the grid rejoins on
                 // close. Disabled only once focus has left the grid, so turning
@@ -1334,7 +1585,11 @@ fun GuideScreen(
         // banner (lifted 14 dp under the bar) when that layout is on. Drawn
         // in the shell's full-screen slot so the scrim dims the whole screen,
         // nav bar included (tvOS); the pane is offset by the guide's own top.
-        val drawerTop = headerHeight + (if (previewMode) GuidePreviewBanner.height - 14.dp else 0.dp)
+        val drawerTop = headerHeight + when {
+            queGuide -> QueGuidePreviewHeight + (if (favoritesOnly) 0.dp else 60.dp)
+            previewMode -> GuidePreviewBanner.height - 14.dp
+            else -> 0.dp
+        }
         val density = androidx.compose.ui.platform.LocalDensity.current
         val guideTop = with(density) { guideTopPx.toDp() }
         val drawerSlot = com.aeriotv.android.feature.main.LocalTvFullScreenOverlay.current
@@ -1522,7 +1777,12 @@ fun GuideScreen(
         val key = reminderKey(channel.name, cell.title, cell.startMillis)
         val isFavorite = channel.id in favoriteIds
         val isRecent = channel.id in recentChannelIds
-        val atCap = stagedMultiview.size >= 4
+        // A Multiview running in the background takes adds up to its own
+        // tile limit (MultiviewBackground.toggleTile), not the staging 4.
+        val mvCap = if (com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null) {
+            multiviewStore.maxTiles
+        } else 4
+        val atCap = stagedMultiview.size >= mvCap
         val canAddToMultiview = channel.url.isNotBlank() && (!atCap || inMultiview) && !mvPlayingHere
         val canRecord = notEnded && (isLive || canRecordToServer)
         val replayable = !cell.isPlaceholder && channel.canReplay(cell, nowMs)
@@ -1539,8 +1799,10 @@ fun GuideScreen(
             // long-press action surface; Logan 2026-09-09), items in the iPhone
             // context-menu order. Jump To lives on the clock cell here.
             val sheetActions = buildList {
-                if (isLive && channel.url.isNotBlank()) add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { onChannelClick(channel) })
+                if (isLive && channel.url.isNotBlank()) add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onChannelClick(channel) } })
                 else if (replayable) add(TvMenuAction("Watch from Start", Icons.Outlined.History, onClick = watchFromStart))
+                com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
+            com.aeriotv.android.feature.player.radioFlagMenuAction(context, channel, state.playlist, viewModel)?.let { add(it) }
                 add(TvMenuAction(if (isFavorite) "Remove from Favorites" else "Add to Favorites", if (isFavorite) Icons.Outlined.StarOutline else Icons.Filled.Star) { favoritesVm.toggle(channel) })
                 // GH #130 (Apple d051505): only while the channel is in Recently Watched.
                 if (isRecent) add(TvMenuAction("Remove from Recently Watched", Icons.Outlined.History, destructive = true) { settingsVm.removeRecentChannel(channel.id) })
@@ -1560,6 +1822,14 @@ fun GuideScreen(
             )
         } else {
         val actions = buildList {
+            // Apple order on TV: Watch first only when a plain Select would
+            // open Radio Mode (declared radio or Radio Mode by Default), then
+            // Radio Mode.
+            if (isLive && channel.url.isNotBlank() && com.aeriotv.android.feature.player.RadioSelect.picksOpenRadio(channel)) {
+                add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onChannelClick(channel) } })
+            }
+            com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
+            com.aeriotv.android.feature.player.radioFlagMenuAction(context, channel, state.playlist, viewModel)?.let { add(it) }
             add(TvMenuAction(if (isFavorite) "Remove from Favorites" else "Add to Favorites") { favoritesVm.toggle(channel) })
             if (isRecent) add(TvMenuAction("Remove from Recently Watched", destructive = true) { settingsVm.removeRecentChannel(channel.id) })
             add(TvMenuAction(if (inMultiview) "Remove from Multiview" else "Add to Multiview", enabled = canAddToMultiview) { multiviewStore.stageToggle(channel) })
@@ -1614,10 +1884,11 @@ private fun GroupPills(
      *  toggle the sidebar rows use); the default pill carries a thumbtack. */
     defaultToken: String = "",
     onSetDefault: ((String) -> Unit)? = null,
+    queStyle: Boolean = false,
 ) {
     val listState = rememberLazyListState()
     val topNav = com.aeriotv.android.feature.main.LocalTvTopNavFocusRequester.current
-    com.aeriotv.android.feature.livetv.RevealPrependedGroups(listState, items.map { it.first }, leadingItems = 1)
+    com.aeriotv.android.feature.livetv.RevealPrependedGroups(listState, items.map { it.first }, leadingItems = if (queStyle) 0 else 1)
     // The row's focus entry used to be a requester on the FIRST pill only.
     // LazyRow disposes pills scrolled out of view, so once the user walked
     // right and picked a later group the first pill was gone, the requester
@@ -1625,7 +1896,7 @@ private fun GroupPills(
     // stuck on the clock). The requester now sits on the row itself (a focus
     // group) and entry is routed to the SELECTED pill, the tvOS behaviour.
     // LazyRow index: the Manage Groups circle is item 0, pills follow.
-    val selectedIndex = items.indexOfFirst { it.first == selected }.let { if (it < 0) -1 else it + 1 }
+    val selectedIndex = items.indexOfFirst { it.first == selected }.let { if (it < 0) -1 else it + if (queStyle) 0 else 1 }
     val selectedPillFocus = remember { FocusRequester() }
     var rowHasFocus by remember { mutableStateOf(false) }
     // A selection made from OUTSIDE the row (sidebar, remote shortcut) glides
@@ -1640,15 +1911,26 @@ private fun GroupPills(
     }
     LazyRow(
         state = listState,
-        contentPadding = PaddingValues(start = leadInset, end = 12.dp, top = 6.dp, bottom = 6.dp),
+        contentPadding = PaddingValues(
+            start = leadInset,
+            end = 12.dp,
+            top = if (queStyle) 12.dp else 6.dp,
+            bottom = if (queStyle) 8.dp else 6.dp,
+        ),
         // The 22dp Manage Groups circle sat on the row's top edge, above the
         // taller pills' center (Streamer 2026-10-11); every item centers.
         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 44.dp)
+            .heightIn(min = if (queStyle) 60.dp else 44.dp)
             .focusRequester(rowFocus)
             .onFocusChanged { rowHasFocus = it.hasFocus }
+            .onPreviewKeyEvent { event ->
+                if (queStyle && event.type == KeyEventType.KeyDown && event.key == Key.Menu) {
+                    onManageGroups()
+                    true
+                } else false
+            }
             // focusProperties must precede focusGroup() to apply to the group.
             .focusProperties {
                 if (topNav != null) up = topNav
@@ -1667,7 +1949,7 @@ private fun GroupPills(
         // button sits to the LEFT of the first group pill on every pill row.
         // Entry focus still goes to the SELECTED pill (selectedPillFocus);
         // Left from the first pill lands here.
-        item(key = "__manage__") {
+        if (!queStyle) item(key = "__manage__") {
             com.aeriotv.android.feature.livetv.TvManageGroupsCircle(
                 hiddenGroupsCount = hiddenGroupCount,
                 onClick = onManageGroups,
@@ -1683,23 +1965,92 @@ private fun GroupPills(
             // selected, white ring focused+selected / accent ring focused+
             // unselected. One focus target only (clickable() inside TvPill).
             val interaction = remember { MutableInteractionSource() }
-            com.aeriotv.android.ui.tv.TvPill(
-                label = label,
-                selected = group == selected,
-                onClick = { onSelect(group) },
-                icon = if (group == com.aeriotv.android.feature.playlist.PlaylistViewModel.FAVORITES_GROUP) Icons.Filled.Star else null,
-                interactionSource = interaction,
-                onLongClick = onSetDefault?.let { set -> { set(group) } },
-                trailingPin = group == defaultToken ||
-                    (group == com.aeriotv.android.feature.playlist.PlaylistViewModel.ALL_GROUPS && defaultToken.isBlank()),
-                modifier = Modifier
-                    .padding(end = 8.dp)
-                    .then(if (group == selected) Modifier.focusRequester(selectedPillFocus) else Modifier)
-                    .onPreviewKeyEvent { e ->
-                        if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionDown) onDown() else false
+            val pillModifier = Modifier
+                .padding(end = 8.dp)
+                .then(if (group == selected) Modifier.focusRequester(selectedPillFocus) else Modifier)
+                .onPreviewKeyEvent { e ->
+                    if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionDown) onDown() else false
+                }
+            if (queStyle) {
+                QueGuideGroupPill(
+                    label = when (group) {
+                        com.aeriotv.android.feature.playlist.PlaylistViewModel.ALL_GROUPS -> "All channels"
+                        com.aeriotv.android.feature.playlist.PlaylistViewModel.FAVORITES_GROUP -> "Favourites"
+                        else -> label
                     },
-            )
+                    selected = group == selected,
+                    favorite = group == com.aeriotv.android.feature.playlist.PlaylistViewModel.FAVORITES_GROUP,
+                    onClick = { onSelect(group) },
+                    onLongClick = onSetDefault?.let { set -> { set(group) } },
+                    interactionSource = interaction,
+                    modifier = pillModifier,
+                )
+            } else {
+                com.aeriotv.android.ui.tv.TvPill(
+                    label = label,
+                    selected = group == selected,
+                    onClick = { onSelect(group) },
+                    icon = if (group == com.aeriotv.android.feature.playlist.PlaylistViewModel.FAVORITES_GROUP) Icons.Filled.Star else null,
+                    interactionSource = interaction,
+                    onLongClick = onSetDefault?.let { set -> { set(group) } },
+                    trailingPin = group == defaultToken ||
+                        (group == com.aeriotv.android.feature.playlist.PlaylistViewModel.ALL_GROUPS && defaultToken.isBlank()),
+                    modifier = pillModifier,
+                )
+            }
         }
+        if (queStyle) item(key = "__manage__") {
+            // Keep management available while navigating the categories;
+            // the program-focused view keeps the reference's clean pill row.
+            if (rowHasFocus) {
+                com.aeriotv.android.feature.livetv.TvManageGroupsCircle(
+                    hiddenGroupsCount = hiddenGroupCount,
+                    onClick = onManageGroups,
+                    modifier = Modifier.onPreviewKeyEvent { event ->
+                        event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown && onDown()
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** The guide's 40dp category capsules follow the reference's larger TV type. */
+@Composable
+private fun QueGuideGroupPill(
+    label: String,
+    selected: Boolean,
+    favorite: Boolean,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+    interactionSource: MutableInteractionSource,
+    modifier: Modifier = Modifier,
+) {
+    val focused by interactionSource.collectIsFocusedAsState()
+    val guard = rememberTvMenuGuard()
+    val fill = when {
+        focused -> RoyalBlueFocus
+        selected -> RoyalBlueRaised
+        else -> RoyalBlueSurface
+    }
+    Row(
+        modifier = modifier
+            .height(40.dp)
+            .clip(CircleShape)
+            .background(fill)
+            .border(2.dp, if (focused) Color.White else Color.Transparent, CircleShape)
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = guard.wrap(onClick),
+                onLongClick = onLongClick?.let { action -> { action(); guard.arm() } },
+            )
+            .padding(horizontal = 16.dp),
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+    ) {
+        if (favorite) Icon(Icons.Filled.Star, null, tint = Color.White, modifier = Modifier.size(18.dp))
+        Text(label, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }
 
@@ -1747,6 +2098,14 @@ private const val WINDOW_ROLL_REUSE_MAX_MS = 2 * 3_600_000L
 
 internal object RetainedGuideGrid {
     private val held = HashMap<Boolean, GuideGridState>()
+    private val firstPaintLogged = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** True exactly once per process. */
+    fun markFirstPaintLogged(): Boolean = firstPaintLogged.compareAndSet(false, true)
+    private val firstCatalogPaintLogged = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** True exactly once per process. */
+    fun markFirstCatalogPaintLogged(): Boolean = firstCatalogPaintLogged.compareAndSet(false, true)
 
     fun take(favoritesOnly: Boolean, initialViewportStartMs: Long): GuideGridState {
         val kept = synchronized(held) { held.remove(favoritesOnly) }

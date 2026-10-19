@@ -1,6 +1,10 @@
 package com.aeriotv.android.ui.tv
 
 import com.aeriotv.android.ui.theme.textAccent
+import com.aeriotv.android.ui.theme.RoyalBlueFocus
+import com.aeriotv.android.ui.theme.RoyalBlueRaised
+import com.aeriotv.android.ui.theme.ensureTextContrast
+import com.aeriotv.android.ui.theme.isQueTheme
 
 import com.aeriotv.android.ui.scale.subtext
 import androidx.compose.animation.animateColorAsState
@@ -101,18 +105,27 @@ fun TvPill(
     val focused by interactionSource.collectIsFocusedAsState()
     val longGuard = com.aeriotv.android.core.tv.rememberTvMenuGuard()
     val colors = MaterialTheme.colorScheme
+    val queTheme = isQueTheme()
     // Unselected fill is a white wash rather than the card colour: on the
     // translucent sheets the card colour vanished into the surface (Logan
     // 2026-09-10), a wash reads on the guide and on every dialog alike.
     // Solid, not see-through (Logan 2026-09-10): the wash is pre-composited
     // over the card colour so nothing behind the sheet shows through a pill.
-    val fill = if (selected) colors.primary
-    else colors.onSurface.copy(alpha = 0.12f).compositeOver(colors.surface)
-    val ink = when {
-        selected -> colors.onPrimary
-        focused -> colors.onSurface
-        else -> colors.onSurfaceVariant
+    val fill = when {
+        queTheme && focused -> RoyalBlueFocus
+        queTheme && selected -> RoyalBlueRaised
+        selected -> colors.primary
+        else -> colors.onSurface.copy(alpha = 0.12f).compositeOver(colors.surface)
     }
+    val ink = ensureTextContrast(
+        when {
+            queTheme && (focused || selected) -> Color.White
+            selected -> colors.onPrimary
+            focused -> colors.onSurface
+            else -> colors.onSurfaceVariant
+        },
+        fill,
+    )
     Row(
         modifier = modifier
             .tvFocusScale(focused, focusedScale = 1.05f)
@@ -122,8 +135,9 @@ fun TvPill(
                 width = TvChrome.ringWidth,
                 color = when {
                     !focused -> Color.Transparent
-                    selected -> colors.onPrimary
-                    else -> colors.textAccent
+                    queTheme -> Color.White
+                    selected -> ensureTextContrast(colors.onPrimary, fill, minimum = 3f)
+                    else -> ensureTextContrast(colors.textAccent, fill, minimum = 3f)
                 },
                 shape = CircleShape,
             )
@@ -287,7 +301,7 @@ fun TvSearchCapsule(
                         Text(
                             text = placeholder,
                             fontSize = 12.sp.subtext(),
-                            color = colors.onSurfaceVariant.copy(alpha = 0.7f),
+                            color = ensureTextContrast(colors.onSurfaceVariant, colors.surfaceVariant),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )

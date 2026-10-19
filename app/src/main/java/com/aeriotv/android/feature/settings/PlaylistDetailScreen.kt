@@ -1,5 +1,7 @@
 package com.aeriotv.android.feature.settings
 
+import com.aeriotv.android.ui.settings.settingsRowCard
+
 import com.aeriotv.android.ui.scale.subtext
 import com.aeriotv.android.ui.theme.textAccent
 import androidx.compose.foundation.background
@@ -36,7 +38,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.aeriotv.android.ui.AerioTextButton as TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -252,13 +254,8 @@ fun PlaylistDetailScreen(
                                 if (isTv) {
                                     Modifier
                                         .onFocusChanged { infoFocused = it.isFocused }
-                                        .background(
-                                            if (infoFocused) {
-                                                MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
-                                            } else {
-                                                Color.Transparent
-                                            },
-                                        )
+                                        // The card's own shape and the 2 dp accent ring.
+                                        .settingsRowCard(infoFocused)
                                         .focusable()
                                 } else {
                                     Modifier
@@ -339,13 +336,8 @@ fun PlaylistDetailScreen(
                                 if (isTv) {
                                     Modifier
                                         .onFocusChanged { permsFocused = it.isFocused }
-                                        .background(
-                                            if (permsFocused) {
-                                                MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
-                                            } else {
-                                                Color.Transparent
-                                            },
-                                        )
+                                        // The card's own shape and the 2 dp accent ring.
+                                        .settingsRowCard(permsFocused)
                                         .focusable()
                                 } else {
                                     Modifier
@@ -606,8 +598,19 @@ fun PlaylistDetailScreen(
                         status = state.epgRefreshStatus,
                     )
                     playlist.lastEpgRefreshedAt?.let { ts ->
+                        // GH #136 diagnosis: the stamp is epoch millis, so the
+                        // label can only be off by the device zone's offset.
+                        // Log what was formatted and in which zone.
+                        androidx.compose.runtime.LaunchedEffect(ts) {
+                            val tz = java.util.TimeZone.getDefault()
+                            android.util.Log.i(
+                                "AerioTV",
+                                "[EPG] last refreshed label: stamp=$ts ageMin=${(System.currentTimeMillis() - ts) / 60_000} " +
+                                    "zone=${tz.id} offsetMin=${tz.getOffset(ts) / 60_000} dst=${tz.inDaylightTime(Date(ts))}",
+                            )
+                        }
                         Text(
-                            text = "Last refreshed: ${DateFormat.getDateTimeInstance().format(Date(ts))}",
+                            text = "Last refreshed: ${LastRefreshedFormat.format(ts)}",
                             style = MaterialTheme.typography.bodySmall.subtext(),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
@@ -806,13 +809,9 @@ private fun ActionRow(
         modifier = Modifier
             .fillMaxWidth()
             .onFocusChanged { focused = it.isFocused }
-            .background(
-                if (focused) {
-                    accent.copy(alpha = 0.16f)
-                } else {
-                    Color.Transparent
-                },
-            )
+            // Shaped fill plus the 2 dp accent ring, as on every settings row
+            // (it was a square wash with no ring on a rounded card).
+            .settingsRowCard(focused)
             // Guarded instead of clickable(enabled = !running) so the row
             // keeps its D-pad focus stop while a run is in flight; a disabled
             // clickable drops out of focus traversal entirely.
@@ -861,4 +860,15 @@ private fun ActionRow(
             )
         }
     }
+}
+
+/** "Last refreshed" label formatting (GH #136), zone explicit for the test. */
+internal object LastRefreshedFormat {
+    fun format(
+        epochMs: Long,
+        zone: java.util.TimeZone = java.util.TimeZone.getDefault(),
+        locale: java.util.Locale = java.util.Locale.getDefault(),
+    ): String = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM, locale)
+        .apply { timeZone = zone }
+        .format(Date(epochMs))
 }

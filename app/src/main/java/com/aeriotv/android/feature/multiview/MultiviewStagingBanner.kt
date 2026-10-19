@@ -18,13 +18,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.aeriotv.android.ui.AerioOutlinedButton as OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.aeriotv.android.ui.AerioTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,6 +36,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.composed
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -64,10 +67,57 @@ fun MultiviewStagingBanner(
     playFocusRequester: FocusRequester? = null,
     upTarget: FocusRequester? = null,
     downTarget: FocusRequester? = null,
+    // Radio start from the guide (Logan 2026-10-15): when set, the radio
+    // banner does NOT pull focus on start; this runs instead so focus stays
+    // on the chosen cell. Up still reaches the banner.
+    radioKeepFocus: (() -> Unit)? = null,
 ) {
     val staging by store.isStaging.collectAsStateWithLifecycle()
     val tiles by store.selected.collectAsStateWithLifecycle()
-    if (!staging || tiles.isEmpty()) return
+    val background by MultiviewBackground.state.collectAsStateWithLifecycle()
+    // Radio Mode (Android#127): on TV this banner slot is its dock card.
+    val radio by com.aeriotv.android.feature.player.RadioMode.state.collectAsStateWithLifecycle()
+    val radioSession = radio
+    if (isTv && radioSession != null && (!staging || tiles.isEmpty())) {
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        RadioTvBanner(
+            channelName = radioSession.channel.name,
+            onReturn = { com.aeriotv.android.feature.player.RadioMode.requestReturn(ctx) },
+            onStop = {
+                // tvOS parity (2026-10-15): Stop restores the origin cell
+                // captured at Radio Mode start, not the row focused now.
+                com.aeriotv.android.feature.player.RadioMode.stop(ctx, "card")
+            },
+            onReturnFocus = onReturnFocus,
+            playFocusRequester = playFocusRequester,
+            upTarget = upTarget,
+            downTarget = downTarget,
+            keepFocus = radioKeepFocus,
+            modifier = modifier,
+        )
+        return
+    }
+    if (!staging || tiles.isEmpty()) {
+        // TV: a Multiview left with "Back to Guide" plays on in the
+        // background; this banner is the TV's dock card for it.
+        val bg = background
+        if (isTv && bg != null) {
+            MultiviewBackgroundTvBanner(
+                tiles = bg.tiles,
+                onReturn = onLaunchMultiview,
+                onStop = {
+                    MultiviewBackground.stop()
+                    if (!store.isStaging.value) store.clear()
+                },
+                onReturnFocus = onReturnFocus,
+                playFocusRequester = playFocusRequester,
+                upTarget = upTarget,
+                downTarget = downTarget,
+                modifier = modifier,
+            )
+        }
+        return
+    }
     val count = tiles.size
     val label = if (count == 1) "1 channel staged for Multiview" else "$count channels staged for Multiview"
     val guard = rememberTvMenuGuard()
@@ -260,4 +310,237 @@ private fun TvBannerCapsule(
     ) {
         content(if (focused) colors.onSurface else null)
     }
+}
+
+/**
+ * TV counterpart of the background Multiview dock card: the same title
+ * ("Multiview playing in background, N channels") and tile names, with
+ * Return to Multiview (back to
+ * the grid as it was) and Stop (end the tiles). The tile names follow the
+ * live set, so adds and removes from the guide menu show here at once.
+ */
+@Composable
+private fun MultiviewBackgroundTvBanner(
+    tiles: List<MultiviewTile>,
+    onReturn: () -> Unit,
+    onStop: () -> Unit,
+    onReturnFocus: (() -> Boolean)?,
+    playFocusRequester: FocusRequester?,
+    upTarget: FocusRequester?,
+    downTarget: FocusRequester?,
+    modifier: Modifier = Modifier,
+) {
+    val guard = rememberTvMenuGuard()
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    val returnFocus: () -> Unit = {
+        val ok = onReturnFocus?.invoke() == true ||
+            focusManager.moveFocus(androidx.compose.ui.focus.FocusDirection.Down)
+        com.aeriotv.android.ui.tv.TvFocusTrace.guide("refocus after=mv-background-banner result=$ok")
+    }
+    val ownFocus = remember { FocusRequester() }
+    val returnFocusRequester = playFocusRequester ?: ownFocus
+    // Back to Guide lands on Return to Multiview (Apple parity). The guide
+    // restores its grid focus while it composes, so wait for that first,
+    // then take focus; guarded so the OK that chose Back to Guide cannot
+    // fire Return by itself.
+    LaunchedEffect(Unit) {
+        guard.arm()
+        kotlinx.coroutines.delay(350L)
+        repeat(20) {
+            if (runCatching { returnFocusRequester.requestFocus() }.isSuccess) {
+                com.aeriotv.android.ui.tv.TvFocusTrace.guide("mv-background-banner focus -> Return to Multiview")
+                return@LaunchedEffect
+            }
+            kotlinx.coroutines.delay(50L)
+        }
+    }
+    val tvNav = Modifier.focusProperties {
+        if (upTarget != null) up = upTarget
+        if (downTarget != null) down = downTarget
+    }
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f))
+            .padding(horizontal = 24.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Filled.GridView,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(18.dp),
+        )
+        androidx.compose.foundation.layout.Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = multiviewBackgroundTitle(tiles.size),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = tiles.joinToString(", ") { it.displayName },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        TvBannerCapsule(
+            onClick = guard.wrap {
+                guard.arm()
+                onReturn()
+            },
+            fill = accent,
+            border = null,
+            modifier = tvNav.focusRequester(returnFocusRequester),
+        ) { _ ->
+            val onAccent = MaterialTheme.colorScheme.onPrimary
+            Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = onAccent, modifier = Modifier.size(12.dp))
+            Text("Return to Multiview", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, softWrap = false, color = onAccent)
+        }
+        TvBannerCapsule(
+            onClick = guard.wrap {
+                returnFocus()
+                onStop()
+            },
+            fill = null,
+            border = null,
+            modifier = tvNav,
+        ) { ink ->
+            Text("Stop", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, softWrap = false,
+                color = ink ?: MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** Radio Mode banner on TV (Android#127): the background Multiview banner's
+ *  slot and shape, with "Switch to Video Mode" and "Stop". */
+@Composable
+private fun RadioTvBanner(
+    channelName: String,
+    onReturn: () -> Unit,
+    onStop: () -> Unit,
+    onReturnFocus: (() -> Boolean)?,
+    playFocusRequester: FocusRequester?,
+    upTarget: FocusRequester?,
+    downTarget: FocusRequester?,
+    keepFocus: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val guard = rememberTvMenuGuard()
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    val returnFocus: () -> Unit = {
+        val ok = onReturnFocus?.invoke() == true ||
+            focusManager.moveFocus(androidx.compose.ui.focus.FocusDirection.Down)
+        com.aeriotv.android.ui.tv.TvFocusTrace.guide("refocus after=radio-banner result=$ok")
+    }
+    val ownFocus = remember { FocusRequester() }
+    val returnFocusRequester = playFocusRequester ?: ownFocus
+    LaunchedEffect(Unit) {
+        // Guard only the OK that just chose Radio Mode; a banner re-shown
+        // after Home (Streamer 2026-10-12) swallowed the first Return press.
+        if (android.os.SystemClock.uptimeMillis() - com.aeriotv.android.feature.player.RadioMode.startedAtMs < 1_500L) guard.arm()
+        kotlinx.coroutines.delay(350L)
+        if (keepFocus != null) {
+            keepFocus()
+            return@LaunchedEffect
+        }
+        repeat(20) {
+            if (runCatching { returnFocusRequester.requestFocus() }.isSuccess) return@LaunchedEffect
+            kotlinx.coroutines.delay(50L)
+        }
+    }
+    val tvNav = Modifier.focusProperties {
+        if (upTarget != null) up = upTarget
+        if (downTarget != null) down = downTarget
+    }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val radioHolder = remember {
+        dagger.hilt.android.EntryPointAccessors.fromApplication(
+            ctx.applicationContext,
+            com.aeriotv.android.feature.main.MainScaffoldEntryPoint::class.java,
+        ).exoPlayerHolder()
+    }
+    // Failed stream: the player overlay's wording, never "Playing".
+    val radioStreamDown by radioHolder.streamUnavailable
+        .collectAsStateWithLifecycle()
+    val radioFailedId by radioHolder.failedChannel.collectAsStateWithLifecycle()
+    val radioUnavailable = radioStreamDown || radioFailedId != null
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f))
+            .padding(horizontal = 24.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Radio,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(18.dp),
+        )
+        androidx.compose.foundation.layout.Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = channelName,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = if (radioUnavailable) RADIO_UNAVAILABLE else RADIO_SUBTITLE,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        TvBannerCapsule(
+            onClick = guard.wrap {
+                guard.arm()
+                onReturn()
+            },
+            fill = accent,
+            border = null,
+            modifier = tvNav.radioTrace("banner:switch").focusRequester(returnFocusRequester),
+        ) { _ ->
+            val onAccent = MaterialTheme.colorScheme.onPrimary
+            Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = onAccent, modifier = Modifier.size(12.dp))
+            Text("Switch to Video Mode", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, softWrap = false, color = onAccent)
+        }
+        TvBannerCapsule(
+            onClick = guard.wrap {
+                returnFocus()
+                onStop()
+            },
+            fill = null,
+            border = null,
+            modifier = tvNav.radioTrace("banner:stop"),
+        ) { ink ->
+            Text("Stop", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, softWrap = false,
+                color = ink ?: MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** Names a radio banner button in the [FOCUS] trace. */
+private fun Modifier.radioTrace(name: String): Modifier = composed {
+    var had by remember { androidx.compose.runtime.mutableStateOf(false) }
+    this.then(Modifier.onFocusChanged {
+        if (it.isFocused && !had) com.aeriotv.android.ui.tv.TvFocusTrace.focus(name)
+        else if (!it.isFocused && had) com.aeriotv.android.ui.tv.TvFocusTrace.blurred(name)
+        had = it.isFocused
+    })
 }

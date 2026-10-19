@@ -17,6 +17,7 @@ fun themePalette(
     isTv: Boolean = false,
     textContrast: Float = 0f,
 ): ThemePalette {
+    val que = appTheme == AppTheme.RoyalBlue && isDark && !trueBlack
     // iOS ThemeManager.useCustomAccent parity: when the user enables a custom
     // accent in Appearance, replace the preset's primary with their hex. Falls
     // back to the preset's own accent when [customAccent] is null. In light mode
@@ -29,7 +30,7 @@ fun themePalette(
     // values verbatim; the light branch reads the theme's light rendition.
     val appBackground = if (isDark) darkAppBackground(appTheme, trueBlack) else appTheme.lightAppBackground
     val cardBackground = if (isDark) darkCardBackground(appTheme, trueBlack) else appTheme.lightCardBackground
-    val textPrimary = if (isDark) TextPrimary else TextPrimaryLight
+    val textPrimary = if (que) Color.White else if (isDark) TextPrimary else TextPrimaryLight
 
     // Android TV needs a 10-foot type scale + slightly brighter dim text. iOS
     // keeps a separate ~1.5x tvOS Typography and pushes secondary text opacity
@@ -45,7 +46,9 @@ fun themePalette(
     // washed pastel, so in light mode we both pull the tint toward the dark ink
     // AND raise the alpha to earn real contrast (the accent is already the
     // darkened light-mode accent here).
-    val baseTextSecondary = if (isDark) {
+    val baseTextSecondary = if (que) {
+        Color(0xFFEDF3FF)
+    } else if (isDark) {
         effectivePrimary.copy(alpha = if (isTv) 0.75f else 0.65f)
     } else {
         lerp(effectivePrimary, textPrimary, 0.20f).copy(alpha = 0.90f)
@@ -55,7 +58,9 @@ fun themePalette(
     // for channel numbers, time ranges, and hints so they recede behind the
     // title/description hierarchy. Carried on Material3's otherwise-unused
     // `tertiary` slot; reach it via `MaterialTheme.colorScheme.tertiary`.
-    val baseTextTertiary = if (isDark) {
+    val baseTextTertiary = if (que) {
+        Color(0xFFDCE9FF)
+    } else if (isDark) {
         effectivePrimary.copy(alpha = if (isTv) 0.45f else 0.28f)
     } else {
         lerp(effectivePrimary, textPrimary, 0.15f).copy(alpha = 0.65f)
@@ -111,11 +116,21 @@ fun themePalette(
         )
     }
 
-    val gradientStops = if (appTheme == AppTheme.RoyalBlue && isDark && !trueBlack) {
-        listOf(RoyalBlueTop, RoyalBlueBottom)
+    val gradientStops = if (que) {
+        listOf(RoyalBlueTop, RoyalBlueBottom, RoyalBlueDecoratedTop, RoyalBlueRaised)
     } else emptyList()
+    val readableScheme = colorScheme.withReadableText(gradientStops)
+    val resolvedScheme = if (que) readableScheme.copy(
+        // Blue panels remain blue; white is reserved for a focused control.
+        primaryContainer = RoyalBlueRaised,
+        onPrimaryContainer = Color.White,
+        secondaryContainer = RoyalBlueSurface,
+        onSecondaryContainer = Color.White,
+        onPrimary = ensureTextContrast(RoyalBlueRail, effectivePrimary),
+        onSecondary = ensureTextContrast(RoyalBlueRail, colorScheme.secondary),
+    ) else readableScheme
     return ThemePalette(
-        scheme = colorScheme.withReadableText(gradientStops),
+        scheme = resolvedScheme,
         baseTextColors = baseTextColors,
         textAccent = ensureTextContrast(textAccent, listOf(appBackground, cardBackground) + gradientStops),
     )

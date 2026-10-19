@@ -69,7 +69,7 @@ import com.aeriotv.android.ui.settings.SettingsSubPageHost
 import com.aeriotv.android.ui.settings.SettingsToggleRow
 import com.aeriotv.android.ui.settings.settingsCountSummary
 import com.aeriotv.android.ui.settings.settingsFormWidth
-import com.aeriotv.android.ui.settings.dpadFocusWash
+import com.aeriotv.android.ui.settings.settingsRowFocusCard
 import com.aeriotv.android.ui.settings.rememberIsTvDevice
 import com.aeriotv.android.ui.theme.textAccent
 
@@ -91,10 +91,10 @@ fun LiveTvSettingsScreen(
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val isTv = rememberIsTvDevice()
-    // TV has no Live TV List view (Logan 2026-09-16, see core.ui.TvListView),
-    // so the list-only options are hidden and the list-facing copy is written
-    // for the Guide's channel column instead. The keys keep their values.
-    val listViewShown = !isTv || com.aeriotv.android.core.ui.TvListView.ENABLED
+    // Que's TV rail exposes Live TV List and Guide separately; other TV themes
+    // retain the upstream TvListView gate. Reuse the same availability decision
+    // as the screen dispatcher so its display settings remain reachable.
+    val listViewShown = com.aeriotv.android.feature.livetv.rememberLiveTvFormFactor().listAvailable
 
     val showChannelLogos by viewModel.showChannelLogos.collectAsStateWithLifecycle(initialValue = true)
     val channelLogoSize by viewModel.channelLogoSize.collectAsStateWithLifecycle(initialValue = 100)
@@ -113,6 +113,8 @@ fun LiveTvSettingsScreen(
     val scaleLiveTV by viewModel.displayScaleLiveTV.collectAsStateWithLifecycle(initialValue = 1.0f)
     val programInfoButton by viewModel.guideProgramInfoButton
         .collectAsStateWithLifecycle(initialValue = GuideProgramInfoButton.OFF)
+    val pibGuide by viewModel.programInfoButtonGuide.collectAsStateWithLifecycle(initialValue = false)
+    val pibList by viewModel.programInfoButtonList.collectAsStateWithLifecycle(initialValue = false)
     var confirmClearRecents by remember { mutableStateOf(false) }
     val palette by viewModel.categoryPalette.collectAsStateWithLifecycle(initialValue = CategoryPaletteState.Default)
 
@@ -233,7 +235,23 @@ fun LiveTvSettingsScreen(
                             selected = programInfoButton,
                             onSelect = viewModel::setGuideProgramInfoButton,
                             leadingIcon = Icons.Outlined.Info,
-                            footer = "Adds an info button to guide program cells that opens Program Info in one tap. Current Programs shows it on programs airing now; All Programs shows it on every cell wide enough for it.",
+                            // Apple parity (2026-10-13): where the button
+                            // shows comes first on the picker's own page.
+                            headerContent = {
+                                SettingsToggleRow(
+                                    title = "Guide View",
+                                    subtitle = "Program Info button on guide program cells.",
+                                    checked = pibGuide,
+                                    onCheckedChange = viewModel::setProgramInfoButtonGuide,
+                                )
+                                SettingsToggleRow(
+                                    title = "List View",
+                                    subtitle = "Program Info button on channel list rows.",
+                                    checked = pibList,
+                                    onCheckedChange = viewModel::setProgramInfoButtonList,
+                                )
+                            },
+                            footer = "Adds an info button that opens Program Info in one tap. Guide View puts it on guide program cells; List View puts it on channel list rows. Current Programs shows it on programs airing now; All Programs shows it on every cell wide enough for it.",
                         )
                     }
                 }
@@ -482,7 +500,7 @@ fun LiveTvSettingsScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .dpadFocusWash()
+                            .settingsRowFocusCard()
                             .clickable(enabled = palette.masterEnabled) { viewModel.resetCategoryPalette() }
                             .alpha(if (palette.masterEnabled) 1f else 0.4f)
                             .padding(horizontal = 16.dp, vertical = 14.dp),

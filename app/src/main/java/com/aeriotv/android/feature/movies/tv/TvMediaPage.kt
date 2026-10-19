@@ -3,6 +3,11 @@ package com.aeriotv.android.feature.movies.tv
 import com.aeriotv.android.ui.theme.forText
 import com.aeriotv.android.ui.scale.subtext
 import com.aeriotv.android.ui.theme.textAccent
+import com.aeriotv.android.ui.theme.RoyalBlueFocus
+import com.aeriotv.android.ui.theme.RoyalBlueRaised
+import com.aeriotv.android.ui.theme.RoyalBlueSurface
+import com.aeriotv.android.ui.theme.ensureTextContrast
+import com.aeriotv.android.ui.theme.isQueTheme
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -80,6 +85,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
@@ -295,6 +301,7 @@ fun <T> TvMediaPage(
     columns: Int,
     gridRowSpacing: Dp,
     sortActions: List<TvMenuAction>,
+    onRefresh: (() -> Unit)? = null,
     onFilter: (() -> Unit)? = null,
     filterActive: Boolean = false,
     searchEnabled: Boolean = false,
@@ -364,6 +371,23 @@ fun <T> TvMediaPage(
      *  height and no scroll-owner target changes (Logan 2026-09-11). */
     footer: (@Composable () -> Unit)? = null,
 ) {
+    if (isQueTheme()) {
+        QueTvMediaPage(
+            gridState = gridState, heroPages = heroPages, shelves = shelves,
+            headerTitle = headerTitle, headerCount = headerCount,
+            sortActions = sortActions, onFilter = onFilter, filterActive = filterActive,
+            onRefresh = onRefresh,
+            searchEnabled = searchEnabled, query = query, onQueryChange = onQueryChange,
+            onClearSearch = onClearSearch, searchPlaceholder = searchPlaceholder,
+            isSearching = isSearching, searchExtras = searchExtras,
+            pills = pills, selectedPill = selectedPill, onPill = onPill,
+            gridItems = gridItems, gridKey = gridKey, cell = cell, emptyContent = emptyContent,
+            returnKey = returnKey, returnOffset = returnOffset, returnSource = returnSource,
+            indexOfKey = indexOfKey, onReturnHandled = onReturnHandled,
+            pageId = pageId, heroSectionTitle = heroSectionTitle, footer = footer,
+        )
+        return
+    }
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val topNav = LocalTvTopNavFocusRequester.current
@@ -2142,6 +2166,10 @@ fun TvPosterCard(
     /** Extra overlay on the art (REC badge, progress bar). */
     overlay: (@Composable androidx.compose.foundation.layout.BoxScope.() -> Unit)? = null,
 ) {
+    if (isQueTheme()) {
+        QuePosterCard(title, year, posterUrl, rating, onClick, modifier, focusRequester, longPressActions, overlay)
+        return
+    }
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     var menuOpen by remember { mutableStateOf(false) }
@@ -2228,6 +2256,10 @@ fun TvRecordingCard(
     focusRequester: FocusRequester? = null,
     longPressActions: List<TvMenuAction> = emptyList(),
 ) {
+    if (isQueTheme()) {
+        QueRecordingCard(title, meta, artUrl, logoUrl, channelName, trailing, progress, badge, onClick, modifier, focusRequester, longPressActions)
+        return
+    }
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     var menuOpen by remember { mutableStateOf(false) }
@@ -2313,6 +2345,124 @@ fun TvRecordingCard(
     }
 }
 
+/** Que's poster and caption form one rounded blue card, including the focus outline. */
+@Composable
+private fun QuePosterCard(
+    title: String,
+    year: Int?,
+    posterUrl: String?,
+    rating: String,
+    onClick: () -> Unit,
+    modifier: Modifier,
+    focusRequester: FocusRequester?,
+    longPressActions: List<TvMenuAction>,
+    overlay: (@Composable androidx.compose.foundation.layout.BoxScope.() -> Unit)?,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    var menuOpen by remember { mutableStateOf(false) }
+    val guard = rememberTvMenuGuard()
+    val shape = RoundedCornerShape(8.dp)
+    Column(
+        modifier = modifier
+            .semantics(mergeDescendants = true) {}
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .clip(shape)
+            .background(if (focused) RoyalBlueFocus else RoyalBlueRaised)
+            .border(3.dp, if (focused) Color.White else Color.Transparent, shape)
+            .combinedClickable(
+                interactionSource = interaction, indication = null, onClick = guard.wrap(onClick),
+                onLongClick = if (longPressActions.isNotEmpty()) ({ menuOpen = true; guard.arm() }) else null,
+            ),
+    ) {
+        Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).background(RoyalBlueSurface)) {
+            if (!posterUrl.isNullOrBlank()) {
+                SizedArtImage(posterUrl, contentDescription = title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            }
+            overlay?.invoke(this)
+        }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(title, color = Color.White, fontSize = 14.sp, lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                listOfNotNull(year?.toString(), rating.takeIf { it.isNotBlank() }?.let { "\u2605 $it" }).joinToString("  ").ifBlank { " " },
+                color = Color(0xFFDCE9FF), fontSize = 11.sp, lineHeight = 13.sp, maxLines = 1,
+            )
+        }
+    }
+    if (menuOpen) TvActionMenuDialog(title, longPressActions, guard, onDismiss = { menuOpen = false })
+}
+
+/** Wide recording thumbnails keep their channel and title over a dark lower gradient. */
+@Composable
+private fun QueRecordingCard(
+    title: String,
+    meta: String,
+    artUrl: String?,
+    logoUrl: String?,
+    channelName: String,
+    trailing: String,
+    progress: Float,
+    badge: TvRecordingBadge?,
+    onClick: () -> Unit,
+    modifier: Modifier,
+    focusRequester: FocusRequester?,
+    longPressActions: List<TvMenuAction>,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    var menuOpen by remember { mutableStateOf(false) }
+    val guard = rememberTvMenuGuard()
+    val shape = RoundedCornerShape(7.dp)
+    Box(
+        modifier = modifier.fillMaxWidth().aspectRatio(2.15f)
+            .semantics(mergeDescendants = true) {}
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .clip(shape).background(RoyalBlueFocus)
+            .combinedClickable(
+                interactionSource = interaction, indication = null, onClick = guard.wrap(onClick),
+                onLongClick = if (longPressActions.isNotEmpty()) ({ menuOpen = true; guard.arm() }) else null,
+            ),
+    ) {
+        if (!artUrl.isNullOrBlank()) {
+            SizedArtImage(artUrl, contentDescription = title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        } else if (!logoUrl.isNullOrBlank()) {
+            AsyncImage(model = logoUrl, contentDescription = channelName, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(20.dp))
+        }
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.24f), Color.Black.copy(alpha = 0.96f)))))
+        Column(
+            Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            if (!logoUrl.isNullOrBlank() && !artUrl.isNullOrBlank()) {
+                AsyncImage(model = logoUrl, contentDescription = channelName, contentScale = ContentScale.Fit, alignment = Alignment.CenterStart, modifier = Modifier.size(width = 54.dp, height = 18.dp))
+            } else if (channelName.isNotBlank()) {
+                Text(channelName, color = Color(0xFFB9DFFF), fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Text(title, color = Color.White, fontSize = 16.sp, lineHeight = 19.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // Timing and episode details remain available without taking a separate caption row.
+            if (focused && (meta.isNotBlank() || trailing.isNotBlank())) Text(
+                listOf(meta, trailing).filter { it.isNotBlank() }.joinToString(" · "),
+                color = Color(0xFFDCE9FF), fontSize = 10.sp, lineHeight = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        badge?.let { b ->
+            Row(
+                Modifier.align(Alignment.TopStart).padding(7.dp).clip(CircleShape).background(b.fill).padding(horizontal = 7.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (b.dot) Box(Modifier.size(5.dp).clip(CircleShape).background(Color.White))
+                b.icon?.let { Icon(it, null, tint = Color.White, modifier = Modifier.size(11.dp)) }
+                Text(b.label, color = Color.White, fontSize = 11.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            }
+        }
+        if (progress > 0f) Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color.White.copy(alpha = 0.25f))) {
+            Box(Modifier.fillMaxHeight().fillMaxWidth(progress.coerceIn(0f, 1f)).background(Color.White))
+        }
+        Box(Modifier.fillMaxSize().border(3.dp, if (focused) Color.White else Color.Transparent, shape))
+    }
+    if (menuOpen) TvActionMenuDialog(title, longPressActions, guard, onDismiss = { menuOpen = false })
+}
+
 data class TvRecordingBadge(
     val label: String,
     val fill: Color,
@@ -2324,7 +2474,7 @@ data class TvRecordingBadge(
 
 /**
  * tvOS AlphabetRail: # then A to Z in 16 dp cells, 36 dp wide, focused
- * letter on an accent-25% disc with a white ring; unavailable letters at
+ * letter on a contrast-safe focus disc and ring; unavailable letters at
  * 35% of the tertiary text color. Entering seats on #, Right leaves.
  */
 @Composable
@@ -2342,6 +2492,16 @@ private fun TvAlphabetRail(
 ) {
     val letters = remember { listOf('#') + ('A'..'Z').toList() }
     val hash = hashRequester
+    val colors = MaterialTheme.colorScheme
+    val que = isQueTheme()
+    val focusFill = if (que) RoyalBlueFocus
+        else colors.primary.copy(alpha = 0.25f).compositeOver(colors.background)
+    val focusInk = ensureTextContrast(if (que) Color.White else colors.onBackground, focusFill)
+    val focusRing = ensureTextContrast(
+        if (que) Color.White else colors.primary,
+        listOf(focusFill, colors.background),
+        minimum = 3f,
+    )
     Column(
         modifier = modifier
             .width(36.dp)
@@ -2360,8 +2520,8 @@ private fun TvAlphabetRail(
                     .size(16.dp)
                     .then(if (letter == '#') Modifier.focusRequester(hash) else Modifier)
                     .clip(CircleShape)
-                    .background(if (focused) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else Color.Transparent)
-                    .border(1.dp, if (focused) Color.White else Color.Transparent, CircleShape)
+                    .background(if (focused) focusFill else Color.Transparent)
+                    .border(1.dp, if (focused) focusRing else Color.Transparent, CircleShape)
                     .focusable(interactionSource = interaction)
                     .onFocusChanged { if (it.isFocused) TvFocusTrace.focus("rail:" + letter) }
                     .onPreviewKeyEvent { ev ->
@@ -2390,7 +2550,7 @@ private fun TvAlphabetRail(
                 Text(
                     letter.toString(), fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     color = when {
-                        focused -> Color.White
+                        focused -> focusInk
                         isAvailable -> MaterialTheme.colorScheme.onSurfaceVariant
                         else -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.35f)
                     },

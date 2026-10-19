@@ -50,7 +50,7 @@ import org.junit.Test
  */
 class CastAudioFrameCensusTest {
 
-    private val ffmpeg = File("/opt/homebrew/bin/ffmpeg")
+    private val ffmpeg = hostMediaTool("ffmpeg")
 
     /** A real ESPNU capture off the live Dispatcharr AAC output profile
      *  (H.264 1920x1080 59.94 fps, AAC-LC 48 kHz stereo, 66 s, 3130 ADTS

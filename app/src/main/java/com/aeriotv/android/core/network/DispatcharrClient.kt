@@ -166,6 +166,12 @@ class DispatcharrClient @Inject constructor() {
      * network or HTTP failure.
      */
     suspend fun login(baseUrl: String, username: String, password: String): JwtPair {
+        // A 429 earlier in the throttle window: do not spend another attempt
+        // (each one re-arms nothing but still counts against the user's IP).
+        DispatcharrLoginGate.serverParkedSeconds(baseUrl).takeIf { it > 0 }?.let { left ->
+            android.util.Log.i("DispatcharrAuthBroker", "[AUTH] login throttled by the server; next attempt in ${left}s")
+            throw DispatcharrError.LoginThrottled(left)
+        }
         val response: HttpResponse = try {
             client.post("${baseUrl.trimEnd('/')}/api/accounts/token/") {
                 contentType(ContentType.Application.Json)
@@ -191,11 +197,12 @@ class DispatcharrClient @Inject constructor() {
             // close on the heels of the first (verify + warmup) trips it,
             // and the generic transport copy sent users chasing URL and
             // credential problems that did not exist (Discord 2026-08-16,
-            // iOS twin fixed the same day). Self-clearing: say WAIT.
-            throw DispatcharrError.Transport(
-                "The server is rate-limiting login attempts (HTTP 429). " +
-                    "Wait a minute and try again.",
-            )
+            // iOS twin fixed the same day). Self-clearing: say WAIT, and
+            // park every login to this server until Retry-After.
+            val secs = DispatcharrLoginGate.parseRetryAfter(response.headers["Retry-After"])
+                ?: DispatcharrLoginGate.DEFAULT_RETRY_AFTER_S
+            DispatcharrLoginGate.parkServer(baseUrl, secs)
+            throw DispatcharrError.LoginThrottled(secs)
         }
         if (!response.status.isSuccess()) {
             throw DispatcharrError.Transport("Login transport error: HTTP $code")
@@ -246,6 +253,12 @@ class DispatcharrClient @Inject constructor() {
             throw DispatcharrError.RefreshExpired(
                 "Refresh token expired. AerioTV will re-authenticate from saved credentials.",
             )
+        }
+        if (code == 429) {
+            val secs = DispatcharrLoginGate.parseRetryAfter(response.headers["Retry-After"])
+                ?: DispatcharrLoginGate.DEFAULT_RETRY_AFTER_S
+            DispatcharrLoginGate.parkServer(baseUrl, secs)
+            throw DispatcharrError.LoginThrottled(secs)
         }
         if (!response.status.isSuccess()) {
             throw DispatcharrError.Transport("Refresh transport error: HTTP $code")
@@ -738,6 +751,9 @@ class DispatcharrClient @Inject constructor() {
         val url = "${baseUrl.trimEnd('/')}/api/epg/programs/$programId/"
         val response: HttpResponse = client.get(url) { applyAuth(apiKey) }
         unauthorizedCheck(response, url)
+        if (response.status.value == 404) {
+            throw DispatcharrError.NotFound("Program detail failed: HTTP 404")
+        }
         if (!response.status.isSuccess()) {
             throw DispatcharrError.Transport("Program detail failed: HTTP ${response.status.value}")
         }
@@ -2066,6 +2082,37 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
+     * PATCH /api/channels/channels/<id>/ with `{"is_radio": flag}` (Mark as
+     * Radio Channel / Unmark Radio Channel, admin only server-side). Returns
+     * the HTTP status on 2xx; throws [StreamOrderSaveException] otherwise
+     * (same status + server reason shape the Switch Stream save uses).
+     */
+    suspend fun updateChannelIsRadio(
+        baseUrl: String,
+        apiKey: String,
+        channelId: Int,
+        isRadio: Boolean,
+    ): Int {
+        val url = "${baseUrl.trimEnd('/')}/api/channels/channels/$channelId/"
+        val response: HttpResponse = client.patch(url) {
+            applyAuth(apiKey)
+            contentType(ContentType.Application.Json)
+            setBody(JsonObject(mapOf("is_radio" to JsonPrimitive(isRadio))))
+        }
+        if (response.status.value == 403) {
+            throw StreamOrderSaveException(403, dispatcharrErrorReason(runCatching { response.bodyAsText() }.getOrNull()))
+        }
+        unauthorizedCheck(response, url)
+        if (!response.status.isSuccess()) {
+            throw StreamOrderSaveException(
+                response.status.value,
+                dispatcharrErrorReason(runCatching { response.bodyAsText() }.getOrNull()),
+            )
+        }
+        return response.status.value
+    }
+
+    /**
      * GET /api/m3u/accounts/ -- the playlist's M3U source accounts. Used to map
      * a stream's m3u_account id to a human source name in the Switch Stream
      * picker ("which M3U is this stream from"). Direct Connect only.
@@ -2489,7 +2536,16 @@ data class DispatcharrChannel(
      *  playable window at 30 regardless). 0 = no archive. */
     @SerialName("catchup_days")
     val catchupDays: Int = 0,
-)
+    /** Radio flag (Dispatcharr dev 2026-10-14): copied from the source stream. */
+    @SerialName("is_radio")
+    val isRadio: Boolean? = null,
+    /** Read-only: [isRadio] after the channel-profile override. Preferred. */
+    @SerialName("effective_is_radio")
+    val effectiveIsRadio: Boolean? = null,
+) {
+    /** effective_is_radio, falling back to is_radio on servers without it. */
+    val radio: Boolean get() = effectiveIsRadio ?: isRadio ?: false
+}
 
 /**
  * One member stream of a Dispatcharr channel, from
@@ -3348,6 +3404,24 @@ fun JsonElement?.flexString(): String? {
     return null
 }
 
+/** `custom_properties.icon`, else the first usable `custom_properties.images`
+ *  entry (a string or an object with `url`). Dummy-EPG artwork (Android#132). */
+internal fun customPropertiesArtwork(props: JsonObject?): String? {
+    if (props == null) return null
+    (props["icon"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?.takeIf { it.isNotBlank() }?.let { return it }
+    val images = props["images"] as? JsonArray ?: return null
+    for (el in images) {
+        val url = when (el) {
+            is JsonPrimitive -> el.takeIf { it.isString }?.content
+            is JsonObject -> (el["url"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            else -> null
+        }
+        if (!url.isNullOrBlank()) return url
+    }
+    return null
+}
+
 @Serializable
 data class DispatcharrEpgEntry(
     // `id` accepted as a JsonElement so the parser tolerates both shapes
@@ -3395,10 +3469,24 @@ data class DispatcharrEpgEntry(
      *  slim grid normally strips it (only the detail endpoint has it), so this
      *  is a free upgrade, not something to rely on. */
     val icon: String? = null,
+    /** Free-form program properties. Dispatcharr dummy-EPG programs
+     *  (apps/output/dummy_epg.py dummy_program_to_api_dict) carry their
+     *  poster here as `icon` (and possibly `images`) instead of a top-level
+     *  icon (Android#132). */
+    @SerialName("custom_properties")
+    val customProperties: JsonObject? = null,
 ) {
     /** Best-effort coercion of the heterogeneous `id` field to Int. */
     val programIdInt: Int?
         get() = (id as? JsonPrimitive)?.intOrNull
+
+    /** Program artwork: top-level icon, else custom_properties.icon, else the
+     *  first usable custom_properties.images entry (string or {url}). */
+    val artworkUrl: String?
+        get() {
+            icon?.takeIf { it.isNotBlank() }?.let { return it }
+            return customPropertiesArtwork(customProperties)
+        }
 }
 
 /**
@@ -3431,6 +3519,10 @@ data class DispatcharrProgramDetail(
      *  Connect (mikec79, 2026-08-19). */
     @SerialName("is_previously_shown")
     val isPreviouslyShown: Boolean = false,
+    /** Free-form program properties; dummy-EPG programs keep their poster
+     *  here as `icon` / `images` (Android#132, same as the grid decoder). */
+    @SerialName("custom_properties")
+    val customProperties: JsonObject? = null,
 ) {
     val tmdbId: String?
         get() = (tmdbIdRaw as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
@@ -3442,7 +3534,8 @@ data class DispatcharrProgramDetail(
         get() {
             posterUrl?.takeIf { it.isNotBlank() }?.let { return it }
             images.firstNotNullOfOrNull { it.url?.takeIf(String::isNotBlank) }?.let { return it }
-            return icon?.takeIf { it.isNotBlank() }
+            icon?.takeIf { it.isNotBlank() }?.let { return it }
+            return customPropertiesArtwork(customProperties)
         }
 }
 

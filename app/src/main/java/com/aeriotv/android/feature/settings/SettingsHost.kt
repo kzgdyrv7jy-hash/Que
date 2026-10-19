@@ -68,6 +68,8 @@ import com.aeriotv.android.ui.settings.LocalSettingsInPane
 import com.aeriotv.android.ui.settings.SettingsNavRow
 import com.aeriotv.android.ui.settings.SettingsSectionHeader
 import com.aeriotv.android.ui.settings.TvSettingsMetrics
+import com.aeriotv.android.ui.theme.AppTheme
+import com.aeriotv.android.ui.theme.LocalAppTheme
 
 /**
  * Fallback touch sidebar width (plan B3) for callers that do not pass one.
@@ -387,6 +389,39 @@ fun SettingsTvRailHost(
         // host, exactly as they do today, so all the TV keyboard and IME
         // plumbing on those screens is untouched.
         detail(pushed)
+        return
+    }
+
+    // Que's Appearance page uses the whole canvas beside the main TV rail,
+    // matching its theme gallery. The category list remains one action away;
+    // Back and the gallery's All settings button both reveal it again.
+    if (LocalAppTheme.current == AppTheme.RoyalBlue &&
+        pushed == null && selection == SettingsRoute.Section(SettingsSection.Appearance)
+    ) {
+        val pageFocus = remember { FocusRequester() }
+        val tabEntry = com.aeriotv.android.feature.main.LocalTvTabEntryFocus.current
+        val active = com.aeriotv.android.feature.main.LocalTabIsActive.current
+        androidx.compose.runtime.DisposableEffect(pageFocus, active) {
+            if (active) tabEntry.value = pageFocus
+            onDispose { if (tabEntry.value === pageFocus) tabEntry.value = null }
+        }
+        androidx.compose.runtime.LaunchedEffect(active, focusPaneSignal) {
+            if (active) {
+                androidx.compose.runtime.withFrameNanos { }
+                runCatching { pageFocus.requestFocus() }
+            }
+        }
+        val revealCategories = { onSelect(SettingsRoute.Root) }
+        androidx.activity.compose.BackHandler(enabled = active) { revealCategories() }
+        paneStateHolder.SaveableStateProvider(encodeSettingsRoute(selection)) {
+            CompositionLocalProvider(
+                LocalSettingsInPane provides true,
+                LocalQueAppearanceExit provides revealCategories,
+                com.aeriotv.android.ui.settings.LocalSettingsTracePage provides encodeSettingsRoute(selection),
+            ) {
+                Box(Modifier.fillMaxSize().focusRequester(pageFocus).focusGroup()) { detail(selection) }
+            }
+        }
         return
     }
 

@@ -2,6 +2,9 @@ package com.aeriotv.android.feature.channels
 
 import com.aeriotv.android.ui.scale.subtext
 import com.aeriotv.android.ui.theme.textAccent
+import com.aeriotv.android.ui.theme.RoyalBlueFocus
+import com.aeriotv.android.ui.theme.RoyalBlueSurface
+import com.aeriotv.android.ui.theme.isQueTheme
 import com.aeriotv.android.core.ui.subtitleIsRedundant
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -16,8 +19,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -103,6 +108,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -115,6 +122,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
@@ -188,6 +196,13 @@ fun ChannelListScreen(
     val settingsVm: SettingsViewModel = hiltViewModel()
     val palette by settingsVm.categoryPalette.collectAsStateWithLifecycle(initialValue = CategoryPaletteState.Default)
     val hiddenGroups by settingsVm.hiddenGroups.collectAsStateWithLifecycle(initialValue = emptySet())
+    // Program Info Button > List View (Apple parity 2026-10-13): the guide
+    // cell's info button on list rows, same mode picker.
+    val pibListOn by settingsVm.programInfoButtonList.collectAsStateWithLifecycle(initialValue = false)
+    val pibMode by settingsVm.guideProgramInfoButton
+        .collectAsStateWithLifecycle(initialValue = com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF)
+    val listInfoButtonMode = if (pibListOn && !rememberIsTvDevice()) pibMode
+        else com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF
     val showChannelLogos by settingsVm.showChannelLogos.collectAsStateWithLifecycle(initialValue = true)
     val showChannelNumbers by settingsVm.showChannelNumbers.collectAsStateWithLifecycle(initialValue = true)
     val groupSortModeRaw by settingsVm.groupSortMode.collectAsStateWithLifecycle(initialValue = "Default")
@@ -233,6 +248,9 @@ fun ChannelListScreen(
         viewModel.onSearchQueryChange("")
     }
     val isTv = rememberIsTvDevice()
+    val queTvList = isTv && isQueTheme()
+    var focusedPreviewChannel by remember { mutableStateOf<M3UChannel?>(null) }
+    val listEntryFocus = remember { FocusRequester() }
     // Phone group selector (Logan 2026-09-05, Apple parity): the slide-in
     // drawer by default, the pill strip when the user picks "pills". TV keeps
     // its own guideGroupSelector; this never reads it.
@@ -468,6 +486,27 @@ fun ChannelListScreen(
                 listState.animateScrollToItem(0)
             }
         }
+        // Back with the list scrolled away from the top (the guide's ladder
+        // step, Logan 2026-10-15): the first Back returns to the top channel
+        // and is consumed; the next Back, at the top, falls through to the
+        // Exit AerioTV? confirm. Overlays composed later (search, sheets,
+        // menus) register their own handlers after this one and still win.
+        val listTabActive = com.aeriotv.android.feature.main.LocalTabIsActive.current
+        val tabEntryFocus = com.aeriotv.android.feature.main.LocalTvTabEntryFocus.current
+        DisposableEffect(queTvList, listTabActive) {
+            if (queTvList && listTabActive) tabEntryFocus.value = listEntryFocus
+            onDispose {
+                if (tabEntryFocus.value === listEntryFocus) tabEntryFocus.value = null
+            }
+        }
+        val listScrolled by remember {
+            derivedStateOf { listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0 }
+        }
+        val listBackScope = rememberCoroutineScope()
+        androidx.activity.compose.BackHandler(enabled = listTabActive && listScrolled) {
+            android.util.Log.i("AerioTV", "[LIST] Back -> top channel")
+            listBackScope.launch { runCatching { listState.animateScrollToItem(0) } }
+        }
         // GROUP CHANGE SCROLL (parity with Apple 072303d/59461fe): the list
         // keeps its first visible item by key, so a group picked while
         // scrolled deep in All could open the new, shorter group at its end.
@@ -497,15 +536,15 @@ fun ChannelListScreen(
         // scroll: the header is fixed, as on iOS). TV keeps its own pill row
         // because the Sort / Manage Groups circles live in it.
         if (isTv) AnimatedVisibility(
-            visible = chipsVisible,
+            visible = queTvList || chipsVisible,
             enter = expandVertically(),
             exit = shrinkVertically(),
         ) {
             LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 56.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                    .heightIn(min = if (queTvList) 40.dp else 56.dp),
+                contentPadding = PaddingValues(horizontal = if (queTvList) 8.dp else 16.dp, vertical = if (queTvList) 4.dp else 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 // On Android TV the List has no top app bar, so Sort leads the
@@ -516,7 +555,7 @@ fun ChannelListScreen(
                 // Number / Name / Favorites ordering - and the Tune circle below
                 // stays as TV's only Manage Groups entry until hidden groups
                 // sync across devices.
-                if (isTv) {
+                if (isTv && !queTvList) {
                     item {
                         SortMenu(
                             currentMode = state.sortMode,
@@ -527,7 +566,7 @@ fun ChannelListScreen(
                 }
                 // Logan 2026-10-10 (explicit decision): Manage Groups sits to
                 // the LEFT of the first group pill.
-                item(key = "__manage__") {
+                if (!queTvList) item(key = "__manage__") {
                     Box(
                         modifier = Modifier
                             .size(36.dp)
@@ -568,6 +607,16 @@ fun ChannelListScreen(
                     key = { "coll_${it.id}" },
                 ) { c -> collectionPillItem(c) }
                 items(groups, key = { "grp_$it" }) { group ->
+                    if (queTvList) {
+                        com.aeriotv.android.ui.tv.TvPill(
+                            label = com.aeriotv.android.feature.livetv.groupDisplayName(group),
+                            selected = state.selectedGroup == group,
+                            onClick = { viewModel.onGroupSelected(group) },
+                            onLongClick = { viewModel.setDefaultGroup(group) },
+                            trailingPin = defaultGroupToken == group,
+                            icon = if (group == PlaylistViewModel.FAVORITES_GROUP) Icons.Filled.Star else null,
+                        )
+                    } else {
                     // Same capsule treatment as the Guide's phone pills (user
                     // report: the two views' pills didn't match; Material's
                     // default FilterChip is an 8dp rounded rect).
@@ -587,15 +636,28 @@ fun ChannelListScreen(
                             selected = state.selectedGroup == group,
                         ),
                     )
+                    }
                 }
                 items(
                     collections.filter { it.placement != ChannelCollection.PLACEMENT_BEGINNING },
                     key = { "coll_${it.id}" },
                 ) { c -> collectionPillItem(c) }
+                if (queTvList) {
+                    item(key = "__que_sort__") {
+                        SortMenu(currentMode = state.sortMode, onSelect = viewModel::onSortModeChange, circular = true)
+                    }
+                    item(key = "__que_manage__") {
+                        com.aeriotv.android.ui.tv.TvActionCircle(
+                            icon = Icons.Outlined.Tune,
+                            contentDescription = "Manage groups",
+                            onClick = { manageGroupsOpen = true },
+                        )
+                    }
+                }
             }
         }
 
-        HorizontalDivider(
+        if (!queTvList) HorizontalDivider(
             color = MaterialTheme.colorScheme.surfaceVariant,
             thickness = 0.5.dp,
         )
@@ -699,12 +761,14 @@ fun ChannelListScreen(
         val channelList: @Composable () -> Unit = {
             LazyColumn(
                 state = listState,
-                modifier = groupSwipeModifier,
+                modifier = groupSwipeModifier.then(
+                    if (queTvList) Modifier.focusRequester(listEntryFocus).focusGroup() else Modifier,
+                ),
                 // 104dp bottom clears the MainScaffold NavigationBar so the
                 // final channel row stays fully visible above the tab bar.
                 contentPadding = PaddingValues(
-                    start = 12.dp,
-                    end = 12.dp,
+                    start = if (queTvList) 8.dp else 12.dp,
+                    end = if (queTvList) 8.dp else 12.dp,
                     top = 8.dp,
                     bottom = LocalTabBarBottomInset.current,
                 ),
@@ -744,6 +808,9 @@ fun ChannelListScreen(
                         } else null,
                         onShowProgramInfo = { programInfoTarget = it },
                         onShowRecord = { recordTarget = it },
+                        infoButtonMode = listInfoButtonMode,
+                        compactQueTvCard = queTvList,
+                        onRowFocused = if (queTvList) { { focusedPreviewChannel = channel } } else null,
                         palette = palette,
                         showLogo = showChannelLogos,
                         showNumber = showChannelNumbers,
@@ -769,7 +836,7 @@ fun ChannelListScreen(
         // same rule the guide applies above its timeline (Logan 2026-09-13).
         // The reserved band's measured bottom is the list's top and the mini's
         // bottom edge, so channel rows never start under the mini.
-        val reserveMiniSlot = isTv && miniActive
+        val reserveMiniSlot = isTv && miniActive && !queTvList
         if (reserveMiniSlot) {
             Spacer(
                 modifier = Modifier
@@ -783,7 +850,27 @@ fun ChannelListScreen(
         DisposableEffect(reserveMiniSlot) {
             onDispose { if (reserveMiniSlot) MiniPlayerChrome.timelineTopPx.value = 0f }
         }
-        if (isTv) {
+        if (queTvList) {
+            val playingChannel = (miniState as? com.aeriotv.android.feature.miniplayer.MiniPlayerSession.State.Active)?.channel
+            val previewChannel = playingChannel ?: focusedPreviewChannel?.takeIf { focused -> filtered.any { it.url == focused.url } }
+                ?: filtered.firstOrNull()
+            val previewProgrammes = previewChannel?.let { state.epgByChannel[it.guideMatchKey] }.orEmpty()
+            Row(Modifier.fillMaxWidth().weight(1f)) {
+                Box(Modifier.weight(0.53f).fillMaxHeight()) { channelList() }
+                QueTvListPreview(
+                    channel = previewChannel,
+                    programme = previewProgrammes.nowPlaying(),
+                    programmes = previewProgrammes,
+                    miniActive = miniActive,
+                    tabActive = listTabActive,
+                    onPlay = {
+                        if (miniActive) miniPlayerVm.session.requestResume()
+                        else previewChannel?.let(onChannelClick)
+                    },
+                    modifier = Modifier.weight(0.47f).padding(start = 22.dp, end = 16.dp, top = 8.dp),
+                )
+            }
+        } else if (isTv) {
             channelList()
         } else {
             PullToRefreshBox(
@@ -957,6 +1044,145 @@ internal fun SortMenu(
     }
 }
 
+/** Compact reference-style card; its parent retains the live row's menu. */
+@Composable
+private fun QueTvChannelCardContent(
+    channel: M3UChannel,
+    programme: EPGProgramme?,
+    programmes: List<EPGProgramme>,
+    isFavorite: Boolean,
+    showLogo: Boolean,
+    showNumber: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val next = nextListProgramme(programmes, programme)
+    val showName = com.aeriotv.android.core.ui.LocalGuideRailPrefs.current.names
+    Row(
+        modifier = modifier.heightIn(min = 88.dp).padding(horizontal = 10.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (showLogo) Box(
+            Modifier.size(width = 58.dp, height = 48.dp).clip(RoundedCornerShape(6.dp))
+                .background(Color(0xFF202A3A)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (channel.tvgLogo.isNotBlank()) {
+                AsyncImage(
+                    model = channel.tvgLogo,
+                    contentDescription = channel.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(4.dp),
+                )
+            } else {
+                Text(channel.name.take(3).uppercase(), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(
+                listOfNotNull(
+                    channel.channelNumber?.takeIf { showNumber && it.isNotBlank() },
+                    channel.name.takeIf { showName },
+                ).joinToString("  ").ifBlank { channel.name },
+                color = Color.White, fontSize = 15.sp, lineHeight = 18.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    programme?.title ?: "No programme information",
+                    color = Color.White, fontSize = 12.sp, lineHeight = 15.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                )
+                programme?.let {
+                    Text("${formatRemaining(it)} left", color = Color.White, fontSize = 10.sp, maxLines = 1)
+                }
+            }
+            if (programme != null) EpgProgressBar(programme) else Spacer(Modifier.height(2.dp))
+            Text(
+                next?.let { "Next ${formatListStart(it)}  ${it.title}" } ?: " ",
+                color = Color.White, fontSize = 11.sp, lineHeight = 14.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Icon(
+            if (isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
+            contentDescription = if (isFavorite) "Favorite" else null,
+            tint = Color.White, modifier = Modifier.size(19.dp),
+        )
+    }
+}
+
+/** A measured slot for the existing persistent player, with real EPG copy. */
+@Composable
+private fun QueTvListPreview(
+    channel: M3UChannel?,
+    programme: EPGProgramme?,
+    programmes: List<EPGProgramme>,
+    miniActive: Boolean,
+    tabActive: Boolean,
+    onPlay: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var measuredBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+    var focused by remember { mutableStateOf(false) }
+    LaunchedEffect(measuredBounds, tabActive) {
+        // Publish before a first tune so Hidden -> Mini starts at this frame
+        // immediately, retaining upstream's no-initial-resize behavior.
+        MiniPlayerChrome.listPreviewBoundsPx.value = measuredBounds.takeIf { tabActive }
+    }
+    DisposableEffect(Unit) {
+        onDispose { MiniPlayerChrome.listPreviewBoundsPx.value = null }
+    }
+    val next = nextListProgramme(programmes, programme)
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                .onGloballyPositioned { measuredBounds = it.boundsInRoot() }
+                .clip(RoundedCornerShape(7.dp))
+                .background(Color.Black)
+                .border(if (focused) 2.dp else 1.dp, Color.White, RoundedCornerShape(7.dp))
+                .onFocusChanged { focused = it.isFocused }
+                .clickable(enabled = channel != null, onClick = onPlay),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (!miniActive) Text(
+                if (channel == null) "No channels available" else "Select a channel to watch",
+                color = Color.White, fontSize = 12.sp,
+            )
+        }
+        Spacer(Modifier.height(3.dp))
+        channel?.let {
+            Text(
+                listOfNotNull(it.channelNumber?.takeIf(String::isNotBlank), it.name).joinToString("  "),
+                color = Color.White, fontSize = 15.sp, lineHeight = 19.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        programme?.let {
+            Text(it.title, color = Color.White, fontSize = 13.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(formatTimeRange(it), color = Color.White, fontSize = 12.sp, lineHeight = 16.sp)
+            if (it.description.isNotBlank()) Text(
+                it.description, color = Color.White, fontSize = 11.sp, lineHeight = 15.sp,
+                maxLines = 3, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        next?.let {
+            Text(
+                "Next ${formatListStart(it)}  ${it.title}", color = Color.White,
+                fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+private fun nextListProgramme(programmes: List<EPGProgramme>, current: EPGProgramme?): EPGProgramme? {
+    val from = current?.endMillis ?: System.currentTimeMillis()
+    return programmes.asSequence().filter { it.startMillis >= from && !it.isPlaceholder }.minByOrNull { it.startMillis }
+}
+
+private fun formatListStart(programme: EPGProgramme): String =
+    com.aeriotv.android.core.ui.ClockFormat.short().format(java.util.Date(programme.startMillis))
+
 /**
  * Channel row matching iOS Live TV canon: dense [#][logo] title + EPG metadata
  * stack, with time-remaining + more + chevron on the right. Tap plays. Long-press
@@ -1008,6 +1234,12 @@ internal fun ChannelRow(
     /** GH #130: non-null while the channel is in Recently Watched; the
      *  long-press menu then offers "Remove from Recently Watched". */
     onRemoveFromRecents: (() -> Unit)? = null,
+    /** Program Info Button > List View: the guide cell's mode (off /
+     *  current / all) for this row's current program. */
+    infoButtonMode: String = com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF,
+    /** Que's split TV list uses one compact card and one focus target. */
+    compactQueTvCard: Boolean = false,
+    onRowFocused: (() -> Unit)? = null,
 ) {
     // iPhone-shaped row on phone and tablet (time on the title line, italic
     // sub-title line); TV keeps the fixed-slot layout.
@@ -1159,13 +1391,16 @@ internal fun ChannelRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = if (compactQueTvCard) it.hasFocus else it.isFocused
+                if (focused) onRowFocused?.invoke()
+            }
             // No focus pop-out on TV: the channel row keeps its size and shows
             // focus via the primary border below (a scaled-up list row reads as
             // jumpy at 10 feet). Phone rows never focus, so this was a no-op there.
             .clip(RoundedCornerShape(CHANNEL_ROW_CORNER))
-            .background(baseSurface)
-            .then(if (tintWash != null) Modifier.background(tintWash) else Modifier)
+            .background(if (compactQueTvCard) { if (focused) RoyalBlueFocus else RoyalBlueSurface } else baseSurface)
+            .then(if (!compactQueTvCard && tintWash != null) Modifier.background(tintWash) else Modifier)
             .then(
                 // D-pad focus ring for the TV List view (the guide is the TV
                 // default, but the List/Guide toggle reaches this row too).
@@ -1174,16 +1409,30 @@ internal fun ChannelRow(
                 // fill contrast.
                 if (focused) Modifier.border(
                     2.dp,
-                    MaterialTheme.colorScheme.primary,
+                    if (compactQueTvCard) Color.White else MaterialTheme.colorScheme.primary,
                     RoundedCornerShape(CHANNEL_ROW_CORNER),
                 ) else Modifier.border(
                     1.dp,
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                    if (compactQueTvCard) Color.Transparent else MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
                     RoundedCornerShape(CHANNEL_ROW_CORNER),
                 ),
             ),
     ) {
         Box {
+            if (compactQueTvCard) {
+                QueTvChannelCardContent(
+                    channel = channel,
+                    programme = nowProgramme,
+                    programmes = programmes,
+                    isFavorite = isFavorite,
+                    showLogo = showLogo,
+                    showNumber = showNumber,
+                    modifier = Modifier.fillMaxWidth().combinedClickable(
+                        onClick = menuGuard.wrap(onPlay),
+                        onLongClick = { menuOpen = true; menuGuard.arm() },
+                    ),
+                )
+            } else {
             // IntrinsicSize.Min makes the row measure to the (unchanged) info
             // column, so the row height is still driven by the text column and
             // is identical to before. The leading logo/number column then
@@ -1416,6 +1665,26 @@ internal fun ChannelRow(
                     // same menu (the DropdownMenu anchors to the row Box, so
                     // no anchor was lost).
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Program Info Button > List View: the guide cell's
+                        // button (same glyph, size, accent tint, hit target)
+                        // for the program airing now. The list only shows
+                        // current programs, so Current and All both show it.
+                        val nowForInfo = nowProgramme
+                        if (nowForInfo != null && !nowForInfo.isPlaceholder &&
+                            com.aeriotv.android.core.preferences.GuideProgramInfoButton.shows(infoButtonMode, isLive = true)
+                        ) {
+                            IconButton(
+                                onClick = { onShowProgramInfo(nowForInfo.toInfoTarget(channel.name, channel.dispatcharrChannelId)) },
+                                modifier = Modifier.size(com.aeriotv.android.feature.livetv.grid.GUIDE_INFO_BUTTON_HIT),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Info,
+                                    contentDescription = "Program Info",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(com.aeriotv.android.feature.livetv.grid.GUIDE_INFO_BUTTON_SIZE),
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = { isExpanded = !isExpanded },
                             modifier = Modifier.size(28.dp),
@@ -1432,15 +1701,30 @@ internal fun ChannelRow(
                 }
             }
 
+            }
             // Channel long-press menu, iOS canon (ChannelListView.swift:1873).
             // Rendered as the shared centered TvActionMenuDialog on TV (this
             // row is reachable with a remote via the Favorites tab) and as
             // the anchored DropdownMenu on phone. Same actions either way.
+            val flagVm: PlaylistViewModel? = if (menuOpen) hiltViewModel() else null
             if (isTv) {
-                if (menuOpen) {
+                if (menuOpen && flagVm != null) {
                     TvActionMenuDialog(
                         title = channel.name,
                         actions = buildList {
+                            if (compactQueTvCard) {
+                                add(TvMenuAction(
+                                    if (isExpanded) "Hide schedule" else "Show schedule",
+                                    Icons.Filled.CalendarMonth,
+                                ) { isExpanded = !isExpanded })
+                            }
+                            // Watch first only when a plain Select would open
+                            // Radio Mode (declared radio or Radio Mode by Default).
+                            if (com.aeriotv.android.feature.player.RadioSelect.picksOpenRadio(channel)) {
+                                add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onPlay() } })
+                            }
+                            com.aeriotv.android.feature.player.radioMenuAction(context, channel, nowProgramme?.title.orEmpty())?.let { add(it) }
+                            com.aeriotv.android.feature.player.radioFlagMenuAction(context, channel, flagVm.state.value.playlist, flagVm)?.let { add(it) }
                             add(
                                 TvMenuAction(
                                     if (isFavorite) "Remove from Favorites" else "Add to Favorites",
@@ -1513,7 +1797,7 @@ internal fun ChannelRow(
                         onDismiss = { menuOpen = false },
                     )
                 }
-            } else if (menuOpen) {
+            } else if (menuOpen && flagVm != null) {
                 // Phone and tablet: Material 3 modal bottom sheet, the same
                 // surface the guide cell uses (Logan 2026-09-09). Apple
                 // cardMenuItems order (ChannelListView.swift:3217): Watch,
@@ -1522,7 +1806,9 @@ internal fun ChannelRow(
                     title = channel.name,
                     subtitle = nowProgramme?.title ?: " ",
                     actions = buildList {
-                        add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { onPlay() })
+                        add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onPlay() } })
+                        com.aeriotv.android.feature.player.radioMenuAction(context, channel, nowProgramme?.title.orEmpty())?.let { add(it) }
+                        com.aeriotv.android.feature.player.radioFlagMenuAction(context, channel, flagVm.state.value.playlist, flagVm)?.let { add(it) }
                         add(
                             TvMenuAction(
                                 if (isFavorite) "Remove from Favorites" else "Add to Favorites",
@@ -1573,6 +1859,7 @@ internal fun ChannelRow(
                 channelDispatcharrId = channel.dispatcharrChannelId,
                 programmes = programmes,
                 onShowProgramInfo = onShowProgramInfo,
+                infoButtonMode = infoButtonMode,
                 onShowRecord = onShowRecord,
                 onWatchPast = onWatchPast,
             )
@@ -1597,8 +1884,16 @@ private fun ChannelGuidePanel(
     onShowProgramInfo: (ProgramInfoTarget) -> Unit,
     onShowRecord: (ProgramInfoTarget) -> Unit,
     onWatchPast: ((EPGProgramme) -> Unit)? = null,
+    /** Program Info Button > List View mode for the schedule rows. */
+    infoButtonMode: String = com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF,
 ) {
     val now = System.currentTimeMillis()
+    // List View info button on a schedule row: All shows it on every
+    // program, Current only on the one airing now (guide cell rule).
+    fun infoFor(p: EPGProgramme): (() -> Unit)? =
+        if (!p.isPlaceholder &&
+            com.aeriotv.android.core.preferences.GuideProgramInfoButton.shows(infoButtonMode, now in p.startMillis until p.endMillis)
+        ) ({ onShowProgramInfo(p.toInfoTarget(channelName, channelDispatcharrId)) }) else null
     val current = programmes.nowPlaying(now)
     val upcoming = remember(programmes, current) {
         programmes
@@ -1692,6 +1987,7 @@ private fun ChannelGuidePanel(
                         onTap = watchPast
                             ?: { onShowProgramInfo(programme.toInfoTarget(channelName, channelDispatcharrId)) },
                         onShowRecord = { onShowRecord(programme.toInfoTarget(channelName, channelDispatcharrId)) },
+                        onInfo = infoFor(programme),
                     )
                 }
                 if (recentlyAired.isNotEmpty() && upcoming.isNotEmpty()) {
@@ -1751,6 +2047,7 @@ private fun ChannelGuidePanel(
                         channelId = channelId,
                         onTap = { onShowProgramInfo(programme.toInfoTarget(channelName, channelDispatcharrId)) },
                         onShowRecord = { onShowRecord(programme.toInfoTarget(channelName, channelDispatcharrId)) },
+                        onInfo = infoFor(programme),
                     )
                 }
             }
@@ -1773,6 +2070,8 @@ private fun UpcomingProgrammeRow(
     replayable: Boolean = false,
     /** Plays the programme from the archive; the menu leads with Watch. */
     onWatch: (() -> Unit)? = null,
+    /** Program Info Button > List View: the row's info button; null hides it. */
+    onInfo: (() -> Unit)? = null,
     remindersVm: RemindersViewModel = hiltViewModel(),
 ) {
     val context = LocalContext.current
@@ -1868,6 +2167,21 @@ private fun UpcomingProgrammeRow(
                 // (epgEntryRow), a rung dimmer than the description.
                 color = MaterialTheme.colorScheme.tertiary,
             )
+            if (onInfo != null) {
+                // Same glyph, size, tint and hit target as the row and the
+                // guide cell button.
+                IconButton(
+                    onClick = onInfo,
+                    modifier = Modifier.size(com.aeriotv.android.feature.livetv.grid.GUIDE_INFO_BUTTON_HIT),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = "Program Info",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(com.aeriotv.android.feature.livetv.grid.GUIDE_INFO_BUTTON_SIZE),
+                    )
+                }
+            }
         }
         // One source of truth for the long-press actions; rendered as the
         // Material bottom sheet on phone and as the shared centered

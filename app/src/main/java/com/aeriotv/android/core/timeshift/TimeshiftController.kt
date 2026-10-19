@@ -37,6 +37,10 @@ class TimeshiftController @Inject constructor(
     private val prefs: AppPreferences,
 ) {
     companion object {
+        /** Retries for a kept fill's first open that meets a 503. */
+        private const val OPEN_BUSY_RETRIES = 4
+        private const val OPEN_BUSY_RETRY_MS = 2_000L
+
         private const val TAG = "TimeshiftController"
 
         /** Retention as a USER concept died in the 2026-07-11 settings
@@ -235,6 +239,9 @@ class TimeshiftController @Inject constructor(
          *  edge (no new connection): adoption keeps the kept fill running as
          *  this session's live feed instead of stopping it. */
         adoptLive: Boolean = false,
+        /** False when the outgoing channel failed (Channel Unavailable): a
+         *  dead stream is never kept live, it is released instead. */
+        keepPrevious: Boolean = true,
     ) {
         liveUrl = streamUrl
         liveHeaders = headers
@@ -258,7 +265,10 @@ class TimeshiftController @Inject constructor(
                 if (!enabled) return@launch
                 val depthMin = prefs.liveRewindDepthMinutes.first()
                 val keepCount = prefs.liveRewindKeepCount.first()
-                if (keepRecent) demoteCurrentSession(keepCount) else stopSessionInternal()
+                if (keepRecent && !keepPrevious && currentChannelName != null) {
+                    Log.i(APP_TAG, "[RETAIN] not kept $currentChannelName: stream failed")
+                }
+                if (keepRecent && keepPrevious) demoteCurrentSession(keepCount) else stopSessionInternal()
                 // Flip-back: adopt the retained session so the rewind
                 // timeline spans the time away. The tee is a different
                 // connection than the retained filler, so mark the splice.
@@ -418,6 +428,8 @@ class TimeshiftController @Inject constructor(
     private fun startRetainedFill(session: RetainedSession) {
         session.fillJob = fillScope.launch {
             var attempts = 0
+            var everConnected = false
+            var openBusyRetries = 0
             while (currentCoroutineContext().isActive && !session.writer.closed) {
                 var endReason: String? = null
                 try {
@@ -433,6 +445,7 @@ class TimeshiftController @Inject constructor(
                             return@use
                         }
                         attempts = 0
+                        everConnected = true
                         val src = resp.body?.byteStream()
                         if (src == null) {
                             endReason = "empty response"
@@ -453,6 +466,17 @@ class TimeshiftController @Inject constructor(
                     Log.w(TAG, "retained fill error for ${session.channelName}: $t")
                 }
                 if (!currentCoroutineContext().isActive || session.writer.closed) return@launch
+                // A keep that opens right after the player stopped (the mini
+                // close) can meet a 503 while the server still holds the
+                // player's slot (Streamer 2026-10-12: released 0.3 s after
+                // the keep). Before the first successful open, a 503 is
+                // retried a few times instead of ending the keep.
+                if (endReason == "http 503" && !everConnected && openBusyRetries < OPEN_BUSY_RETRIES) {
+                    openBusyRetries++
+                    Log.i(APP_TAG, "[RETAIN] kept fill for ${session.channelName}: http 503 on open, retry $openBusyRetries/$OPEN_BUSY_RETRIES")
+                    kotlinx.coroutines.delay(OPEN_BUSY_RETRY_MS)
+                    continue
+                }
                 endReason?.let { reason ->
                     releaseRetainedAfterFillEnd(session, reason)
                     return@launch
@@ -555,7 +579,13 @@ class TimeshiftController @Inject constructor(
      * multiview, PiP handoff). Buffered data stays on disk until the
      * retention reaper ages it out.
      */
-    fun onFullscreenLiveStopped(keepIfEnabled: Boolean = false, toMini: Boolean = false) {
+    fun onFullscreenLiveStopped(
+        keepIfEnabled: Boolean = false,
+        toMini: Boolean = false,
+        /** True when the closing channel failed (Channel Unavailable) and has
+         *  not played since: a dead stream is never kept live, as for a flip. */
+        streamFailed: Boolean = false,
+    ) {
         // Snapshot the actual play URL now if the holder still has one
         // (post LAN/WAN failover); after an X-close the holder is already
         // stopped and demotion falls back to the tune-time URL.
@@ -567,7 +597,10 @@ class TimeshiftController @Inject constructor(
             // channel so the mini's X can keep it live (same outcome as the
             // full-screen X). Only a channel that had a buffer qualifies,
             // which already excludes HLS and non-TS sessions.
-            miniKeepCandidate = if (toMini && activeWriter != null) {
+            if (toMini && streamFailed && activeWriter != null) {
+                Log.i(APP_TAG, "[RETAIN] not kept ${currentChannelName ?: "?"}: stream failed")
+            }
+            miniKeepCandidate = if (toMini && !streamFailed && activeWriter != null) {
                 val id = currentChannelId
                 val url = lastPlayUrlSnapshot ?: liveUrl
                 if (id != null && url != null) {
@@ -581,7 +614,10 @@ class TimeshiftController @Inject constructor(
             val keep = keepIfEnabled && activeWriter != null && runCatching {
                 prefs.liveRewindEnabled.first() && prefs.liveRewindKeepRecent.first()
             }.getOrDefault(false)
-            if (keep) {
+            if (keep && streamFailed) {
+                Log.i(APP_TAG, "[RETAIN] not kept ${currentChannelName ?: "?"}: stream failed")
+                stopSessionInternal()
+            } else if (keep) {
                 val name = currentChannelName
                 val keepCount = runCatching { prefs.liveRewindKeepCount.first() }.getOrDefault(1)
                 demoteCurrentSession(keepCount)
@@ -621,14 +657,17 @@ class TimeshiftController @Inject constructor(
      * player is stopped so only one connection is open at a time. No-op when
      * the setting is off or the minimized channel had no buffer.
      */
-    fun onMiniClosed() {
+    fun onMiniClosed(via: String = "mini-x") {
         scope.launch {
-            val c = miniKeepCandidate ?: return@launch
+            val c = miniKeepCandidate ?: run {
+                Log.i(APP_TAG, "[RETAIN] not kept on mini close ($via): no buffered channel was minimized")
+                return@launch
+            }
             miniKeepCandidate = null
             runCatching {
                 val keep = prefs.liveRewindEnabled.first() && prefs.liveRewindKeepRecent.first()
                 if (!keep) {
-                    Log.i(APP_TAG, "[RETAIN] not kept on mini close ${c.channelName}: Keep Recent Channels Live off")
+                    Log.i(APP_TAG, "[RETAIN] not kept on mini close ${c.channelName} ($via): Keep Recent Channels Live off")
                     return@launch
                 }
                 val depthMin = prefs.liveRewindDepthMinutes.first()
@@ -655,7 +694,7 @@ class TimeshiftController @Inject constructor(
                 evictPastCap(keepCount)
                 startRetainedFill(session)
                 publishRetained()
-                Log.i(APP_TAG, "[RETAIN] kept on mini close ${c.channelName}")
+                Log.i(APP_TAG, "[RETAIN] kept on close: ${c.channelName} (mini, via $via)")
             }.onFailure { Log.w(TAG, "mini close keep failed: $it") }
         }
     }

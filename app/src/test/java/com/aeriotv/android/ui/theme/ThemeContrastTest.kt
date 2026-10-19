@@ -37,6 +37,10 @@ class ThemeContrastTest {
                     assertContrast(c.onSecondary, c.secondary)
                     assertContrast(c.onSecondaryContainer, c.secondaryContainer)
                     assertContrast(c.onError, c.error)
+                    assertContrast(c.onErrorContainer, c.errorContainer)
+                    assertContrast(c.onTertiaryContainer, c.tertiaryContainer)
+                    assertContrast(c.inverseOnSurface, c.inverseSurface)
+                    assertContrast(c.inversePrimary, c.inverseSurface)
                     for (surface in listOf(c.background, c.surface, c.surfaceVariant)) {
                         assertContrast(c.onBackground, surface)
                         assertContrast(c.onSurfaceVariant, surface)
@@ -52,12 +56,27 @@ class ThemeContrastTest {
     @Test
     fun royalBlueTextIsReadableAtEveryGradientStop() {
         val palette = themePalette(AppTheme.RoyalBlue)
-        for (stop in listOf(RoyalBlueTop, palette.scheme.background, RoyalBlueBottom)) {
+        for (stop in listOf(RoyalBlueTop, palette.scheme.background, RoyalBlueBottom, RoyalBlueDecoratedTop)) {
             assertContrast(palette.scheme.onBackground, stop)
             assertContrast(palette.scheme.onSurfaceVariant, stop)
             assertContrast(palette.scheme.tertiary, stop)
             assertContrast(palette.textAccent, stop)
         }
+    }
+
+    @Test
+    fun queFocusAndSelectedStatesRemainReadableWithAWhiteCustomAccent() {
+        val scheme = themePalette(AppTheme.RoyalBlue, customAccent = Color.White).scheme
+        for (fill in listOf(RoyalBlueSurface, RoyalBlueRaised, RoyalBlueRail, RoyalBlueFocus)) {
+            assertContrast(Color.White, fill)
+            assertContrast(guideCellInk(scheme, fill).title, fill)
+            assertContrast(guideCellInk(scheme, fill).focus, fill, 3f)
+        }
+        assertContrast(RoyalBlueRail, Color.White)
+        assertEquals(RoyalBlueRaised, scheme.primaryContainer)
+        assertEquals(RoyalBlueSurface, scheme.secondaryContainer)
+        assertTrue(scheme.onSurface != scheme.surface)
+        assertTrue(scheme.onPrimary != scheme.primary)
     }
 
     @Test

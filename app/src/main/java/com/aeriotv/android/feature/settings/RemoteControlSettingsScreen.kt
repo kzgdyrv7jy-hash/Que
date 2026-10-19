@@ -104,7 +104,32 @@ private val GUIDE_ARROW_SLOTS = setOf(
     RemoteSlot.RIGHT_SHORT, RemoteSlot.RIGHT_LONG,
 )
 
+/** Guide Back and Hold Back (Logan 2026-10-15). The double-Back rules and the
+ *  Radio Mode shortcuts stay fixed, and with a mini up on TV the mini owns
+ *  Back, so the mini-only close action is not offered. */
+private val GUIDE_BACK_SLOTS = listOf(RemoteSlot.BACK_SHORT, RemoteSlot.BACK_LONG)
+
+private val GUIDE_BACK_CHOICES = listOf(
+    GuideRemoteAction.BACK_LADDER,
+    GuideRemoteAction.FOCUS_GROUP_PILLS,
+    GuideRemoteAction.JUMP_TO_NOW,
+    GuideRemoteAction.JUMP_TO_TOP,
+    GuideRemoteAction.JUMP_TO_DAY,
+    GuideRemoteAction.PAGE_UP,
+    GuideRemoteAction.PAGE_DOWN,
+    GuideRemoteAction.TIMELINE_BACK,
+    GuideRemoteAction.TIMELINE_FORWARD,
+    GuideRemoteAction.PROGRAM_INFO,
+    GuideRemoteAction.OPEN_SEARCH,
+    GuideRemoteAction.RESUME_PLAYER,
+    GuideRemoteAction.NONE,
+)
+
 private fun guideActionChoices(slot: RemoteSlot): List<GuideRemoteAction> = buildList {
+    if (slot in GUIDE_BACK_SLOTS) {
+        addAll(GUIDE_BACK_CHOICES)
+        return@buildList
+    }
     if (slot in GUIDE_ARROW_SLOTS) {
         add(GuideRemoteAction.FOCUS_GROUP_PILLS)
         add(GuideRemoteAction.TIMELINE_BACK)
@@ -156,6 +181,8 @@ private val RemoteSlot.displayName: String
         RemoteSlot.REWIND -> "Rewind"
         RemoteSlot.CHANNEL_UP -> "Channel Up"
         RemoteSlot.CHANNEL_DOWN -> "Channel Down"
+        RemoteSlot.BACK_SHORT -> "Back"
+        RemoteSlot.BACK_LONG -> "Hold Back"
     }
 
 private val PlayerRemoteAction.displayName: String
@@ -210,8 +237,44 @@ private val GuideRemoteAction.displayName: String
         GuideRemoteAction.PLAY -> "Play channel"
         GuideRemoteAction.NAVIGATE -> "Move focus"
         GuideRemoteAction.OPEN_SEARCH -> "Search"
+        GuideRemoteAction.BACK_LADDER -> "Back ladder (top channel, then close)"
         GuideRemoteAction.NONE -> "Do nothing"
     }
+
+/** Guide actions offered for a learned button: the extended-button list plus
+ *  the program actions that act on every press. */
+private val LEARNED_GUIDE_CHOICES: List<GuideRemoteAction> = listOf(
+    GuideRemoteAction.PAGE_UP,
+    GuideRemoteAction.PAGE_DOWN,
+    GuideRemoteAction.TIMELINE_BACK,
+    GuideRemoteAction.TIMELINE_FORWARD,
+    GuideRemoteAction.JUMP_TO_NOW,
+    GuideRemoteAction.JUMP_TO_DAY,
+    GuideRemoteAction.JUMP_TO_TOP,
+    GuideRemoteAction.FOCUS_GROUP_PILLS,
+    GuideRemoteAction.RESUME_PLAYER,
+    GuideRemoteAction.PLAY,
+    GuideRemoteAction.PROGRAM_INFO,
+    GuideRemoteAction.PROGRAM_MENU,
+    GuideRemoteAction.RECORD,
+    GuideRemoteAction.NONE,
+)
+
+private fun learnedKeyName(keyCode: Int): String =
+    com.aeriotv.android.core.remote.LearnedButtons.displayName(
+        android.view.KeyEvent.keyCodeToString(keyCode),
+        keyCode,
+    )
+
+/** Learn Button flow: wait for a press, then pick the two actions. */
+private sealed interface LearnStep {
+    data object Capturing : LearnStep
+    data class PickPlayer(val keyCode: Int) : LearnStep
+    data class PickGuide(val keyCode: Int, val player: PlayerRemoteAction) : LearnStep
+    data class Edit(val keyCode: Int) : LearnStep
+    data class EditPlayer(val keyCode: Int) : LearnStep
+    data class EditGuide(val keyCode: Int) : LearnStep
+}
 
 @Composable
 fun RemoteControlSettingsScreen(
@@ -224,6 +287,11 @@ fun RemoteControlSettingsScreen(
     var editingPlayerSlot by remember { mutableStateOf<RemoteSlot?>(null) }
     var editingGuideSlot by remember { mutableStateOf<RemoteSlot?>(null) }
     var showResetConfirm by remember { mutableStateOf(false) }
+    val learned by viewModel.learnedRemoteButtons.collectAsStateWithLifecycle(initialValue = emptyMap())
+    var learnStep by remember { mutableStateOf<LearnStep?>(null) }
+    fun saveLearned(b: com.aeriotv.android.core.remote.LearnedButton) {
+        viewModel.setLearnedRemoteButtons((learned + (b.keyCode to b)).values)
+    }
     val groupSelector by viewModel.guideGroupSelector.collectAsStateWithLifecycle(
         initialValue = "pills",
     )
@@ -303,6 +371,16 @@ fun RemoteControlSettingsScreen(
                             onClick = { editingGuideSlot = slot },
                         )
                     }
+                    GUIDE_BACK_SLOTS.forEach { slot ->
+                        SlotRow(
+                            slotName = slot.displayName,
+                            valueName = map.guideAction(slot, groupSelector == "sidebar").displayName(groupSelector == "sidebar"),
+                            subtitle = if (slot == RemoteSlot.BACK_SHORT) {
+                                "Single press. Pressing twice quickly and the Radio Mode shortcuts are fixed."
+                            } else null,
+                            onClick = { editingGuideSlot = slot },
+                        )
+                    }
                 }
 
                 SettingsSection(
@@ -325,6 +403,26 @@ fun RemoteControlSettingsScreen(
                             onClick = { editingGuideSlot = slot },
                         )
                     }
+                }
+
+                SettingsSection(
+                    header = "Learned Buttons",
+                    footer = "Teach AerioTV a button the lists above do not cover, such as the color, Guide, Info or F buttons on your remote. Choose Learn Button, press the button (Back cancels), then pick what it does while watching and in the guide.",
+                ) {
+                    learned.values.sortedBy { it.keyCode }.forEach { b ->
+                        SlotRow(
+                            slotName = learnedKeyName(b.keyCode),
+                            valueName = b.player.displayName,
+                            onClick = { learnStep = LearnStep.Edit(b.keyCode) },
+                        )
+                    }
+                    SlotRow(
+                        slotName = "Learn Button",
+                        valueName = if (learnStep == LearnStep.Capturing) "Press a button now" else " ",
+                        onClick = {
+                            learnStep = if (learnStep == LearnStep.Capturing) null else LearnStep.Capturing
+                        },
+                    )
                 }
 
                 SettingsSection(
@@ -391,6 +489,91 @@ fun RemoteControlSettingsScreen(
         )
     }
 
+    when (val step = learnStep) {
+        null -> Unit
+        LearnStep.Capturing -> {
+            androidx.compose.runtime.DisposableEffect(Unit) {
+                com.aeriotv.android.core.remote.LearnedButtons.onCapture = { code ->
+                    learnStep = LearnStep.PickPlayer(code)
+                }
+                onDispose { com.aeriotv.android.core.remote.LearnedButtons.onCapture = null }
+            }
+            // Inline, not a dialog: a dialog is its own window, and the
+            // capture runs in MainActivity.dispatchKeyEvent. Back cancels.
+            androidx.activity.compose.BackHandler { learnStep = null }
+        }
+        is LearnStep.PickPlayer, is LearnStep.EditPlayer -> {
+            val code = if (step is LearnStep.PickPlayer) step.keyCode else (step as LearnStep.EditPlayer).keyCode
+            val existing = learned[code]
+            TvActionMenuDialog(
+                title = "${learnedKeyName(code)}: While Watching",
+                actions = PLAYER_ACTION_CHOICES.map { action ->
+                    val current = existing?.player == action
+                    TvMenuAction(label = if (current) "${action.displayName}  (current)" else action.displayName) {
+                        if (step is LearnStep.PickPlayer) {
+                            learnStep = LearnStep.PickGuide(code, action)
+                        } else {
+                            saveLearned((existing ?: com.aeriotv.android.core.remote.LearnedButton(code)).copy(player = action))
+                            learnStep = null
+                        }
+                    }
+                },
+                onDismiss = { learnStep = null },
+                guard = menuGuard,
+                width = 340.dp,
+            )
+        }
+        is LearnStep.PickGuide, is LearnStep.EditGuide -> {
+            val code = if (step is LearnStep.PickGuide) step.keyCode else (step as LearnStep.EditGuide).keyCode
+            val existing = learned[code]
+            val sidebar = groupSelector == "sidebar"
+            TvActionMenuDialog(
+                title = "${learnedKeyName(code)}: In the Guide",
+                actions = LEARNED_GUIDE_CHOICES.map { action ->
+                    val current = existing?.guide == action
+                    val name = action.displayName(sidebar)
+                    TvMenuAction(label = if (current) "$name  (current)" else name) {
+                        val base = existing ?: com.aeriotv.android.core.remote.LearnedButton(code)
+                        saveLearned(
+                            if (step is LearnStep.PickGuide) base.copy(player = step.player, guide = action)
+                            else base.copy(guide = action),
+                        )
+                        learnStep = null
+                    }
+                },
+                onDismiss = { learnStep = null },
+                guard = menuGuard,
+                width = 340.dp,
+            )
+        }
+        is LearnStep.Edit -> {
+            val b = learned[step.keyCode]
+            if (b == null) {
+                learnStep = null
+            } else {
+                val sidebar = groupSelector == "sidebar"
+                TvActionMenuDialog(
+                    title = learnedKeyName(b.keyCode),
+                    actions = listOf(
+                        TvMenuAction(label = "While Watching: ${b.player.displayName}") {
+                            learnStep = LearnStep.EditPlayer(b.keyCode)
+                        },
+                        TvMenuAction(label = "In the Guide: ${b.guide.displayName(sidebar)}") {
+                            learnStep = LearnStep.EditGuide(b.keyCode)
+                        },
+                        TvMenuAction(label = "Forget Button", destructive = true) {
+                            viewModel.setLearnedRemoteButtons((learned - b.keyCode).values)
+                            learnStep = null
+                        },
+                    ),
+                    onDismiss = { learnStep = null },
+                    guard = menuGuard,
+                    width = 340.dp,
+                )
+            }
+        }
+    }
+
     if (showResetConfirm) {
         TvActionMenuDialog(
             title = "Lose your remote control customizations?",
@@ -412,16 +595,25 @@ private fun SlotRow(
     slotName: String,
     valueName: String,
     onClick: () -> Unit,
+    subtitle: String? = null,
 ) {
     SettingsRowContainer(onClick = onClick) {
         // Same title size and weight as every other Settings row.
-        Text(
-            text = slotName,
-            style = com.aeriotv.android.ui.settings.settingsRowTitleStyle(),
-            color = MaterialTheme.colorScheme.onBackground,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f),
-        )
+        androidx.compose.foundation.layout.Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = slotName,
+                style = com.aeriotv.android.ui.settings.settingsRowTitleStyle(),
+                color = MaterialTheme.colorScheme.onBackground,
+                fontWeight = FontWeight.Medium,
+            )
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         if (valueName.isNotEmpty()) {
             Spacer(Modifier.width(12.dp))
             Text(

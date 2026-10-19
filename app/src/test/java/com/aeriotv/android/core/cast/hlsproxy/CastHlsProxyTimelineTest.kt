@@ -119,7 +119,7 @@ class CastHlsProxyTimelineTest {
 
     // ---- (2) onSegmentComposition timeline census ----
 
-    private val ffmpeg = File("/opt/homebrew/bin/ffmpeg")
+    private val ffmpeg = hostMediaTool("ffmpeg")
     private val workDir: File by lazy { File("build/tmp/castHlsProxyTimeline").apply { mkdirs() } }
 
     private class Census(

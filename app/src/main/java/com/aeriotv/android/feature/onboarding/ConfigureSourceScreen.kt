@@ -2,6 +2,7 @@ package com.aeriotv.android.feature.onboarding
 
 import com.aeriotv.android.ui.scale.subtext
 import com.aeriotv.android.ui.theme.textAccent
+import com.aeriotv.android.ui.theme.appBackground
 import com.aeriotv.android.core.data.db.entity.sanitizeGuideDays
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
@@ -65,6 +66,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aeriotv.android.core.data.SourceType
@@ -100,6 +102,8 @@ fun ConfigureSourceScreen(
     viewModel: PlaylistViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val queSignIn = rememberIsTvDevice() && com.aeriotv.android.ui.theme.isQueTheme() &&
+        (sourceType == SourceType.DispatcharrApiKey || sourceType == SourceType.DispatcharrUserPass)
 
     // Make sure the VM knows which type we're configuring before the user enters anything.
     androidx.compose.runtime.LaunchedEffect(sourceType) {
@@ -146,7 +150,7 @@ fun ConfigureSourceScreen(
 
     TvKeyboardOnOkHost {
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
+        if (!queSignIn) TopAppBar(
             title = {
                 Text(
                     "Configure",
@@ -194,18 +198,34 @@ fun ConfigureSourceScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .then(if (queSignIn) Modifier.appBackground() else Modifier)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = vp.gutter, vertical = 12.dp),
+                .padding(horizontal = vp.gutter, vertical = if (queSignIn) 24.dp else 12.dp),
             contentAlignment = androidx.compose.ui.Alignment.TopCenter,
         ) {
         Column(
-            modifier = if (vp.onboardingMaxWidth != androidx.compose.ui.unit.Dp.Unspecified)
+            modifier = (if (queSignIn)
+                Modifier.widthIn(max = 560.dp).fillMaxWidth()
+            else if (vp.onboardingMaxWidth != androidx.compose.ui.unit.Dp.Unspecified)
                 Modifier.widthIn(max = vp.onboardingMaxWidth).fillMaxWidth()
             else
-                Modifier.fillMaxWidth(),
+                Modifier.fillMaxWidth()).then(
+                    if (queSignIn) Modifier.clip(RoundedCornerShape(20.dp))
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(24.dp)
+                    else Modifier,
+                ),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            SourceTypeCard(icon = cardIcon, title = cardTitle, subtitle = cardSubtitle)
+            if (queSignIn) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("AerioTV Blue", color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                    Text("Sign in to your Dispatcharr server",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 16.sp)
+                }
+                Spacer(Modifier.height(6.dp))
+            } else SourceTypeCard(icon = cardIcon, title = cardTitle, subtitle = cardSubtitle)
 
             when (sourceType) {
                 SourceType.DispatcharrApiKey, SourceType.DispatcharrUserPass -> {
@@ -831,7 +851,7 @@ private fun VodEnabledRow(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .clip(RoundedCornerShape(12.dp))
-                .dpadFocusWash()
+                .dpadFocusRing(RoundedCornerShape(12.dp), washTint = MaterialTheme.colorScheme.primary)
                 .toggleable(
                     value = checked,
                     interactionSource = remember { MutableInteractionSource() },
@@ -895,7 +915,7 @@ private fun DvrDestinationRow(
                     else MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .dpadFocusWash()
+                        .dpadFocusRing(RoundedCornerShape(50), washTint = MaterialTheme.colorScheme.primary)
                         .background(
                             if (selected) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
@@ -942,7 +962,7 @@ private fun GuideHistoryRow(
                     else MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .dpadFocusWash()
+                        .dpadFocusRing(RoundedCornerShape(50), washTint = MaterialTheme.colorScheme.primary)
                         .background(
                             if (selected) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),

@@ -1,64 +1,59 @@
-# AerioTV Blue
+# AerioTV Que edition
 
-Personal version of AerioTV 0.5.11, based on upstream commit
-`7cb2ccb0ca7456db1f55c2b25290ba127df939c6` (tag `v0.5.11`).
-Upstream: https://github.com/jonzey231/AerioTV-Android
+Based on AerioTV Android v0.5.13, upstream commit
+`8b2d935a307d99203a0fd91e44a83c9f2ae430fd`.
+The downloaded release APK was verified against GitHub's published SHA-256:
+`1ed8fe2ec0f943f2fcdc4fed9d02e3cfcde562cf4d675d6d2a2cf79bf50e80ca`.
 
-## Changes
+## Que design
 
-- Royal Blue is the default theme: a blue gradient inspired by the supplied
-  reference, navy cards, and pale blue accents. It has a light rendition and
-  supports the existing Dark / Light / System and True Black preferences.
-- Buttons choose black or white foregrounds from the actual accent fill.
-  White custom accents no longer produce white button labels in light mode.
-- Secondary and small text receive a minimum contrast adjustment rather than
-  disappearing into their surfaces.
-- Guide text and focus outlines account for each rendered category/focus fill.
-  Text caches invalidate when the palette changes. Badges use readable ink.
-- Focused guide controls, search results, and shared TV controls follow the
-  resolved light/dark palette.
-- Separate package `com.aeriotv.blue`, launcher label `AerioTV Blue`, and
-  `aeriotvblue://` deep links allow installation alongside the original.
+Que Blue is the default theme. The Android TV rendition follows the supplied
+reference: a fixed cobalt navigation rail; separate Live TV and Guide entries;
+a diagonal blue glow and translucent circles; large category pills; a text-only
+programme hero; rounded channel/programme cards; five-column poster grids;
+three-column recording grids; a centred Dispatcharr sign-in panel; and an
+Appearance palette gallery.
+
+Live TV uses a channel list and a measured 16:9 preview slot for the existing
+Media3 player. Guide/list choice is session-only. Existing playback preferences,
+server data, search, recording, radio, menus and programme-info actions remain.
+Other existing themes retain the upstream shell. Explicit Light and True Black
+preferences remain available. Four additional pale-blue presets provide both
+light and dark renditions.
+
+Contrast fixes choose foregrounds against actual fills, including white custom
+accents, focused filters, guide/category fills, action menus and alphabet rails.
+Material text and outlined actions use readable accent ink. Host media tests
+locate FFmpeg/ffprobe through PATH instead of assuming a macOS Homebrew path.
+Theme tests enforce
+4.5:1 normal text and 3:1 focus contrast, including the blue gradient/decorations.
+
+## Identity and installation
+
+Package `com.aeriotv.blue`, label AerioTV Blue, version `0.5.13-que.1`, version
+code `6901`. This can update the previous personal Blue build with the same key
+and coexist with the original AerioTV app. Original-app data is separate.
+
+The Play distribution variant is built for sideloading because it excludes the
+upstream self-updater. Updates signed with the upstream key cannot replace this
+personal package. Google Drive and Google Cast need personal app registrations;
+this source defaults their application IDs to empty.
 
 ## Build
 
-Use JDK 21, Android SDK platform 36 and build tools 36.0.0. Gradle 9.5.0 is
-pinned by the wrapper. The bundled FFmpeg AAR is unchanged.
+JDK 21, Android SDK 36/build-tools 36.0.0, and Gradle 9.5.0:
 
 ```sh
-./gradlew :app:testPlayDebugUnitTest \
-  --tests com.aeriotv.android.ui.theme.ThemeContrastTest \
-  --tests com.aeriotv.android.feature.livetv.grid.GuideGridStateTest \
-  :app:assemblePlayRelease
+./gradlew :app:testPlayDebugUnitTest :app:assemblePlayRelease
 ```
 
-The `play` variant is used because it omits the upstream self-updater. Personal
-builds must not try to install updates signed by the upstream app's key. This
-APK is for direct installation; it has not been uploaded to Google Play.
+Release output is unsigned unless your own gitignored `keystore.properties` is
+configured. Align and sign using Android SDK zipalign/apksigner and retain your
+key for future updates. Never commit signing keys or passwords.
 
-Release APKs are unsigned unless your own `keystore.properties` is configured
-as described by the upstream build. Alternatively, align the unsigned APK and
-sign it using Android SDK `zipalign` and `apksigner`. Keep your private signing
-key outside source control and reuse it for future updates to this app.
+## Licence
 
-The supplied personal APK uses its own signing identity. Its app data is
-separate from the original; add or import your playlists in the new app.
-
-## Optional Google integrations
-
-The source defaults to empty Google Drive OAuth and Cast application IDs.
-Drive sign-in and Google Cast therefore require your own app registrations,
-configured for the personal package and signing certificate. No credentials
-or registration IDs from the original APK are reused. Playlist, guide and
-local playback code remains available without those integrations.
-
-## Licence and source
-
-The original licence, exception, third-party notices, and FFmpeg build
-instructions are retained. Modifications were made for the Blue edition in
-October 2026 and are supplied under the project's GPL-3.0-or-later licence.
-See `LICENSE`, `LICENSE-EXCEPTIONS.md`, and `THIRD_PARTY_LICENSES.md`.
-
-This source does not include private signing keys, credentials, build caches,
-or the user's playlists. See the accompanying validation report for the
-checks actually executed and their limits.
+Original GPL-3.0-or-later, exceptions, third-party notices and bundled FFmpeg
+source/build instructions are retained. See LICENSE, LICENSE-EXCEPTIONS.md,
+THIRD_PARTY_LICENSES.md and app/libs/README.md. Modifications: October 2026.
+See VALIDATION.md for checks actually performed and their limits.

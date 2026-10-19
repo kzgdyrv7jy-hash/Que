@@ -93,6 +93,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -164,6 +165,9 @@ private const val TAG = "MultiviewScreen"
 @Composable
 fun MultiviewScreen(
     onClose: () -> Unit,
+    /** Logan 2026-10-12: a running Multiview reduced to one live channel
+     *  hands that channel to the standard single-channel player. */
+    onPlaySingleChannel: ((String) -> Unit)? = null,
     httpHeaders: Map<String, String> = emptyMap(),
     storeHandle: MultiviewStoreHandle = rememberMultiviewStoreHandle(),
     settingsVm: SettingsViewModel = hiltViewModel(),
@@ -284,7 +288,9 @@ fun MultiviewScreen(
         }
     }
     val enterBackground: () -> Unit = {
-        if (!isTvDevice && selected.isNotEmpty() && backgroundRequest.value == null) {
+        // TV too since the Leave Multiview "Back to Guide" action (2026-10-12):
+        // the guide shows the background banner instead of the dock card.
+        if (selected.isNotEmpty() && backgroundRequest.value == null) {
             backgroundPositions.clear()
             selected.forEachIndexed { i, t ->
                 if (t.kind != TileKind.Live) tilePlayers[i]?.let { backgroundPositions[i] = it.currentPosition }
@@ -352,7 +358,9 @@ fun MultiviewScreen(
         when {
             relocatingIndex != null -> relocatingIndex = null
             fullscreenIndex != null -> fullscreenIndex = null
-            isTvDevice && selected.isNotEmpty() -> {
+            // Every form factor (2026-10-12), 2 or more tiles: Back to Guide,
+            // Exit Multiview, Cancel. A single tile exits directly.
+            selected.size >= 2 -> {
                 exitDialogOpen = true
                 exitGuard.arm()
             }
@@ -421,6 +429,23 @@ fun MultiviewScreen(
         finishedTiles = shift(finishedTiles)
         scrubberTiles = shift(scrubberTiles)
         storeHandle.removeAt(idx)
+    }
+
+    // One channel left after removals (picker deselects or a tile's Remove)
+    // plays in the standard player once the picker is closed: Play, swipe
+    // down and Back all close it. Same rule as MainScaffold's single-staged
+    // and one-background-channel paths. Only after the grid had 2 or more
+    // tiles, and only for a live tile (on-demand tiles have no channel).
+    var hadMultipleTiles by remember { mutableStateOf(false) }
+    LaunchedEffect(selected.size, addPickerOpen, tileMenuIndex) {
+        if (selected.size >= 2) hadMultipleTiles = true
+        val only = selected.singleOrNull() ?: return@LaunchedEffect
+        if (!hadMultipleTiles || addPickerOpen || tileMenuIndex != null) return@LaunchedEffect
+        if (only.kind != TileKind.Live || onPlaySingleChannel == null) return@LaunchedEffect
+        android.util.Log.i("AerioMV", "[MV] one channel left (${only.displayName}): standard player")
+        hadMultipleTiles = false
+        exitClearRequested.value = true
+        onPlaySingleChannel(only.id)
     }
 
     if (selected.isEmpty()) {
@@ -638,6 +663,10 @@ fun MultiviewScreen(
                 when {
                     relocatingIndex != null -> relocatingIndex = null
                     fullscreenIndex != null -> fullscreenIndex = null
+                    selected.size >= 2 -> {
+                        exitDialogOpen = true
+                        exitGuard.arm()
+                    }
                     else -> onClose()
                 }
             })
@@ -674,16 +703,19 @@ fun MultiviewScreen(
         TvActionMenuDialog(
             title = "Leave Multiview?",
             actions = listOf(
+                // Back to Guide (2026-10-12, replaces "Add streams": Add
+                // Channel lives in the tile menu): the tiles keep playing
+                // headless (MultiviewBackground) with their channels staged;
+                // the dock card (phone, tablet) or the guide banner (TV)
+                // returns to the grid.
                 TvMenuAction(
-                    label = "Add streams",
-                    icon = Icons.Filled.Add,
-                    // Reopen the picker over the running grid. Existing tiles
-                    // stay in the store and keep playing; the picker APPENDS.
-                    onClick = { addPickerOpen = true },
+                    label = "Back to Guide",
+                    icon = Icons.Filled.LiveTv,
+                    onClick = {
+                        exitDialogOpen = false
+                        enterBackground()
+                    },
                 ),
-                // "Back to TV Guide" removed (Logan 2026-08-31): with Add
-                // streams in this menu and on the grid, a keep-tiles-and-
-                // leave option just duplicated the system Back flow.
                 TvMenuAction(
                     label = "Exit Multiview",
                     icon = Icons.Outlined.Close,
@@ -719,6 +751,22 @@ fun MultiviewScreen(
             // Navigation.kt's hiltViewModel(parent) wiring.
             playlistVm = playlistVm,
             swapTargetTileId = swapTargetTileId,
+            // Deselecting a checked row removes that tile in place (fixed
+            // slots, removeTileAt). The sole remaining tile is never removed
+            // here: it stays selected with a "Last channel in the Multiview"
+            // toast (Apple decision 2026-10-12).
+            onRemoveTile = { id ->
+                val idx = selected.indexOfFirst { it.id == id }
+                if (idx >= 0) {
+                    if (selected.size <= 1) {
+                        // Apple parity: the last tile stays selected.
+                        android.util.Log.i("AerioMV", "[MV] picker: last channel kept (${selected.first().displayName})")
+                        android.widget.Toast.makeText(mvContext, "Last channel in the Multiview", android.widget.Toast.LENGTH_SHORT).show()
+                    } else {
+                        removeTileAt(idx)
+                    }
+                }
+            },
             onLaunch = { addPickerOpen = false; swapTargetTileId = null },
             onCancel = { addPickerOpen = false; swapTargetTileId = null },
             onDismiss = { addPickerOpen = false; swapTargetTileId = null },
@@ -1216,8 +1264,20 @@ private fun TileGrid(
         mutableStateOf(focusedIndex.coerceIn(0, (tiles.size - 1).coerceAtLeast(0)))
     }
     val gridFocusRequester = remember { FocusRequester() }
+    var gridHostFocused by remember { mutableStateOf(false) }
+    // GH #138: a single request on entry can lose a race with the screen we
+    // came from (the guide, entered via the staging banner's Play, is still
+    // composed for the exit transition). Keep asking for about a second
+    // until the grid host actually holds focus.
     LaunchedEffect(Unit) {
-        if (isTv) runCatching { gridFocusRequester.requestFocus() }
+        if (!isTv) return@LaunchedEffect
+        repeat(30) { attempt ->
+            if (!gridHostFocused) {
+                val ok = runCatching { gridFocusRequester.requestFocus() }.isSuccess
+                if (attempt > 0) com.aeriotv.android.ui.tv.TvFocusTrace.player("multiview grid refocus attempt=$attempt ok=$ok")
+            }
+            kotlinx.coroutines.delay(50L)
+        }
     }
     val slotKeyState = remember { TileSlotKeys() }
     // Item #16 focus-trap fix: while a per-tile scrubber strip is up it owns
@@ -1277,6 +1337,7 @@ private fun TileGrid(
             // pulls focus into an individual (offset-placed) tile, which
             // is what made the ring vanish on first navigation.
             .focusRequester(gridFocusRequester)
+            .onFocusChanged { gridHostFocused = it.isFocused }
             .focusable()
             .onKeyEvent { ev ->
                 if (!isTv || anyFullscreen) return@onKeyEvent false
@@ -2129,9 +2190,13 @@ private fun ExoTile(
     val playerRef = remember { mutableStateOf<ExoPlayer?>(null) }
     // Developer Force HLS: the tile gets the main player's HLS treatment
     // (load profile, per-channel target, warm join, trough ramp).
+    // Read so a tile recomposes once its host is learned as server HLS.
+    @Suppress("UNUSED_VARIABLE")
+    val serverHlsVersion = com.aeriotv.android.core.playback.ForceHls.serverHlsVersion.intValue
     val forcedHlsTile = tile.kind == TileKind.Live && (
         com.aeriotv.android.core.playback.ForceHls.isForcedHlsUrl(url) ||
-            (com.aeriotv.android.core.playback.ForceHls.enabled &&
+            ((com.aeriotv.android.core.playback.ForceHls.enabled ||
+                com.aeriotv.android.core.playback.ForceHls.isServerHlsHost(url)) &&
                 com.aeriotv.android.core.playback.ForceHls.isDispatcharrLive(url))
         )
     val forceHlsTargetMs = remember(tile.id, url) {
@@ -2276,7 +2341,11 @@ private fun ExoTile(
                 }
             val dataSourceFactory: () -> androidx.media3.datasource.DataSource.Factory = {
                 vodDataSourceFactory
-                    ?: tracer.wrapDataSourceFactory(forceHlsTile.wrap(liveCalls.newFactory(headers, tileUserAgent, 30_000)))
+                    ?: tracer.wrapDataSourceFactory(
+                        com.aeriotv.android.core.playback.ServerHlsGuard.Factory(
+                            forceHlsTile.wrap(liveCalls.newFactory(headers, tileUserAgent, 30_000)),
+                        ),
+                    )
             }
             // Tiles decode audio to PCM (no passthrough): PCM AudioTracks are
             // mixed by the platform in any number, so every tile can keep its
@@ -2478,6 +2547,25 @@ private fun ExoTile(
                 override fun onPlayerError(error: PlaybackException) {
                     val retryUrl = currentUrlRef.value
                     if (retryUrl.isBlank()) return
+                    // Dispatcharr proxy output set to HLS: the host is now learned,
+                    // so rebuilding the source routes the tile through its HLS session.
+                    com.aeriotv.android.core.playback.ForceHls.findServerHlsRedirect(error)?.let { redirect ->
+                        Log.i(TAG, "[FORCE-HLS] tile $channelName live URL answered with an HLS playlist; re-tuning through the HLS session path")
+                        // Adopt the session the redirected open minted (no second resolve).
+                        forceHlsTile.adopt(
+                            com.aeriotv.android.core.playback.ForceHls.apply(retryUrl, "multiview tile"),
+                            com.aeriotv.android.core.playback.ForceHls.Session(
+                                redirect.playlistUrl,
+                                com.aeriotv.android.core.playback.ForceHls.tokenFor(redirect.playlistUrl),
+                            ),
+                        )
+                        liveCalls.setSource(player) { buildTileMediaSource(retryUrl, dataSourceFactory()) }
+                        tracer.recover("server HLS adoption")
+                        tracer.markTuneStart(channelName, traceKind)
+                        player.prepare()
+                        player.playWhenReady = !paused
+                        return
+                    }
                     if (!isVod && tile.kind != TileKind.Dvr) {
                         com.aeriotv.android.core.playback.DispatcharrConnectionLimit.parse(error)?.let { notice ->
                             Log.w(TAG, "[LIMIT] tile $channelName ${notice.kind} \"${notice.message}\"; waiting for Retry")
@@ -2659,11 +2747,13 @@ private fun ExoTile(
                                 DefaultDataSource.Factory(view.context, swapHttp)
                             } else {
                                 // DefaultHttpDataSource defaults: 8 s connect + read.
-                                forceHlsTile.wrap(
-                                    liveCalls.newFactory(
-                                        headers,
-                                        "AerioTV/${com.aeriotv.android.BuildConfig.VERSION_NAME} (Android; ${android.os.Build.MODEL})",
-                                        8_000,
+                                com.aeriotv.android.core.playback.ServerHlsGuard.Factory(
+                                    forceHlsTile.wrap(
+                                        liveCalls.newFactory(
+                                            headers,
+                                            "AerioTV/${com.aeriotv.android.BuildConfig.VERSION_NAME} (Android; ${android.os.Build.MODEL})",
+                                            8_000,
+                                        ),
                                     ),
                                 )
                             },
