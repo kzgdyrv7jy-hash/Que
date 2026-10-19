@@ -11,6 +11,12 @@ Android 8.0+; ARM64, ARMv7 and x86_64.
 [Checksums](downloads/SHA256SUMS.txt) and the
 [complete build source archive](downloads/AerioTV-Que-0.5.13-source.zip) accompany it.
 
+For the VirusTotal upload-warning comparison, download the
+[v2-only signed copy](https://github.com/kzgdyrv7jy-hash/Que/raw/refs/heads/main/downloads/AerioTV-Que-0.5.13-que.1-v2-only.apk).
+Its 1,024 app payload entries match the Que build byte for byte; it uses the same
+signing certificate, with only v2 signing enabled. See the
+[comparison checks and test limits](V2_ONLY_VALIDATION.md).
+
 The signed APK can update the earlier personal AerioTV Blue build and installs
 alongside the original AerioTV. The original app's data is separate. The upstream
 self-updater is omitted; Google Drive/Cast require personal registrations.
