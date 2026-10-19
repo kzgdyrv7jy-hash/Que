@@ -13,7 +13,7 @@ does not by itself explain their different upload warnings. Daylight uses a
 debug signing certificate; Que has a valid personal release certificate. Signing
 validity is not the identified problem.
 
-## Remaining structural correlation
+## Observed differences and test results
 
 | APK | User-reported upload warning | V2 signature | Gap before APK signing block |
 | --- | --- | --- | ---: |
@@ -21,12 +21,14 @@ validity is not the identified problem.
 | Official AerioTV 0.5.13 | No | Verifies | 0 bytes |
 | Que, v2-only copy | Yes | Verifies | 2,512 bytes |
 | Que, preserved local-entry layout | Yes | Verifies | 2,480 bytes |
-| New Que no-gap copy | Not yet tested | Verifies | 0 bytes |
+| Que no-gap copy | Yes | Verifies | 0 bytes |
 
-The gap is valid page padding produced by the standalone signing tool. Its
-presence correlates with the warning in these examples, but this comparison does
-not prove that VirusTotal's upload classifier uses it. The cause remains a
-hypothesis pending the controlled upload test below.
+The gap is valid page padding produced by the standalone signing tool. On
+19 October 2026, the user reported the same warning for the no-gap comparison
+APK. Removing it did not change the result. Gap padding, v1/v3 signatures and
+rewritten local ZIP alignment are therefore ruled out as sufficient explanations
+for the warning in this test sequence. No further APK variant is justified by
+those hypotheses. The precise upload-classification trigger remains unknown.
 
 ## No-gap comparison APK
 
@@ -75,11 +77,17 @@ build-tools `apksigner verify` and `zipalign` commands.
 
 ## VirusTotal test status
 
-Upload the no-gap APK using the same browser and workflow as the other APKs,
-and record whether the warning appears. No VirusTotal upload or scan was run
-by this build workflow. Warning removal and per-engine scan coverage remain
-unverified. A result of `Undetected` is not a byte-coverage measurement; see the
+The user reported that the no-gap APK still displays the archive warning. No
+VirusTotal upload or scan was run by this build workflow. The local validity
+checks remain successful, but they do not establish how VirusTotal processes
+the APK. A result of `Undetected` is not a byte-coverage measurement; see the
 [previous comparison results and limits](V2_ONLY_VALIDATION.md).
+
+The next requested observation is to select the exact same APK again in a fresh
+VirusTotal tab after its first analysis has completed. Whether that opens an
+existing report or repeats the warning could distinguish a first-upload workflow
+from a repeatable warning for an already-known file. No outcome is assumed, and
+the website's ordering of hash lookup and archive validation has not been verified.
 
 Public verification files:
 

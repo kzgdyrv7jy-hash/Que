@@ -11,13 +11,11 @@ Android 8.0+; ARM64, ARMv7 and x86_64.
 [Checksums](downloads/SHA256SUMS.txt) and the
 [complete build source archive](downloads/AerioTV-Que-0.5.13-source.zip) accompany it.
 
-For the VirusTotal upload-warning comparison, download the
-[v2 copy with no gap before the signing block](https://github.com/kzgdyrv7jy-hash/Que/raw/refs/heads/main/downloads/AerioTV-Que-0.5.13-que.1-v2-no-gap.apk).
-It retains Gradle's original entry headers, padding and compressed app files,
-with the same signing certificate and v2 signing only. See the
-[Daylight comparison and verification](APK_PACKAGING_COMPARISON.md), the
-[earlier ZIP layout checks](ZIP_LAYOUT_VALIDATION.md) and the
-[signature-only comparison result](V2_ONLY_VALIDATION.md).
+The [VirusTotal packaging comparison](APK_PACKAGING_COMPARISON.md) records the
+tests against Daylight and official AerioTV. V2-only signing, preserved ZIP
+entries and removal of the pre-signature gap all produced the same upload
+warning according to the user. The comparison APKs and verification reports
+remain available; none is presented as a confirmed fix for that warning.
 
 The signed APK can update the earlier personal AerioTV Blue build and installs
 alongside the original AerioTV. The original app's data is separate. The upstream
