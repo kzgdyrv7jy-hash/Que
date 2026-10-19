@@ -1,0 +1,17 @@
+Verifies
+Verified using v1 scheme (JAR signing): false
+Verified using v2 scheme (APK Signature Scheme v2): true
+Verified using v3 scheme (APK Signature Scheme v3): false
+Verified using v3.1 scheme (APK Signature Scheme v3.1): false
+Verified using v4 scheme (APK Signature Scheme v4): false
+Verified for SourceStamp: false
+Number of signers: 1
+Signer #1 certificate DN: CN=AerioTV Blue Personal Build
+Signer #1 certificate SHA-256 digest: c66eabc3339a28adcfca2e3003ecdb679812def71f59e6068a20d0c9d1ca389e
+Signer #1 certificate SHA-1 digest: 5dc8ca5f15b2f15afffda289aa76efd263e7a327
+Signer #1 certificate MD5 digest: f168f0270a9bea3f60648b48433034a0
+Signer #1 key algorithm: RSA
+Signer #1 key size (bits): 3072
+Signer #1 public key SHA-256 digest: f6f0ba8e35ee7e92836d9af13a34d01b9c1e47af47a2f1354edf4625bcea8d03
+Signer #1 public key SHA-1 digest: d00391e3104dbd683d5995bd9c1ed8cae67e8de0
+Signer #1 public key MD5 digest: 1d69b9a288852cc3251fe9c3db6aec3a

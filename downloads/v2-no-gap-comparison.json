@@ -1,0 +1,22 @@
+{
+  "apk": "AerioTV-Que-0.5.13-que.1-v2-no-gap.apk",
+  "bytes": 12222417,
+  "sha256": "b93c7d855634f936746c85689c42eb8fda1922b4d89ff8dcbb921469dc5b52fe",
+  "identical_payload_entries": 1024,
+  "identical_raw_zip_entry_bytes": 12154448,
+  "central_directory_bytes_identical": 63851,
+  "pre_signing_block_gap": 0,
+  "signing_block_bytes": 4096,
+  "signing_block_ids": [
+    "0x7109871a",
+    "0x42726577"
+  ],
+  "signing_scheme": "v2 only",
+  "certificate_sha256": "c66eabc3339a28adcfca2e3003ecdb679812def71f59e6068a20d0c9d1ca389e",
+  "native_alignment": "16KiB passed",
+  "zip_integrity": "passed",
+  "matching_build_inputs": 455,
+  "application_id": "com.aeriotv.blue",
+  "version_code": 6901,
+  "version_name": "0.5.13-que.1"
+}

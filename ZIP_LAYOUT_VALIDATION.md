@@ -58,11 +58,10 @@ certificate is retained.
 
 ## VirusTotal test status
 
-This layout-preserving copy has not yet been tested on VirusTotal by the user.
-Whether it changes the upload warning is unverified. Upload this specific file
-using the same browser and workflow as the previous comparison, then record the
-warning, detected file type and per-engine results. This change does not itself
-establish how many bytes each antivirus engine analyses.
+The user subsequently reported the same archive warning for this copy. Retaining
+the local ZIP entry layout did not remove it. A comparison with a second APK that
+uploads without the warning found a remaining pre-signing-block gap difference.
+See the [Daylight comparison and no-gap test](APK_PACKAGING_COMPARISON.md).
 
 Verification output:
 
